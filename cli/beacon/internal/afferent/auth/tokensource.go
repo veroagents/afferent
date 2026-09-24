@@ -89,6 +89,9 @@ func (ts *TokenSource) Credentials(ctx context.Context) (*Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ts.checkOwner(ctx, c); err != nil {
+		return nil, err
+	}
 	if c.ValidFor(ts.now(), ts.skew()) {
 		return c, nil
 	}
@@ -115,6 +118,11 @@ func (ts *TokenSource) Credentials(ctx context.Context) (*Credentials, error) {
 	ep, err := ts.endpoints(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// Never send a refresh token to an issuer or client it was not issued
+	// for. The file store has one path for every issuer.
+	if !c.Matches(ep.Issuer, ts.Client.ClientID) {
+		return nil, mismatchError(c, ep.Issuer, ts.Client.ClientID)
 	}
 	tr, err := ts.Client.Refresh(ctx, ep, c.RefreshToken)
 	if err != nil {
@@ -149,6 +157,29 @@ func (ts *TokenSource) load() (*Credentials, error) {
 		return nil, ErrLoginRequired
 	}
 	return c, err
+}
+
+// checkOwner refuses credentials issued to another issuer or client than the
+// configured one. Discovery is only needed when the stored issuer differs
+// from the configured URL (a loopback alias whose canonical issuer differs).
+func (ts *TokenSource) checkOwner(ctx context.Context, c *Credentials) error {
+	if ts.Client == nil {
+		return nil
+	}
+	if c.Matches(ts.Client.Issuer, ts.Client.ClientID) {
+		return nil
+	}
+	if c.ClientID != ts.Client.ClientID {
+		return mismatchError(c, ts.Client.Issuer, ts.Client.ClientID)
+	}
+	ep, err := ts.endpoints(ctx)
+	if err != nil {
+		return err
+	}
+	if !c.Matches(ep.Issuer, ts.Client.ClientID) {
+		return mismatchError(c, ep.Issuer, ts.Client.ClientID)
+	}
+	return nil
 }
 
 func (ts *TokenSource) endpoints(ctx context.Context) (*Endpoints, error) {
@@ -188,4 +219,47 @@ func DeleteLocked(ctx context.Context, store Store, lockPath string) error {
 	}
 	defer unlock()
 	return store.Delete()
+}
+
+// SwapLocked replaces the stored credentials with c and returns what was
+// stored before (nil if nothing or unreadable), reading and writing under the
+// refresh lock. Login uses the returned credentials to revoke the previous
+// session: reading them outside the lock could return a refresh token that
+// another process has since rotated, leaving the rotated one live.
+func SwapLocked(ctx context.Context, store Store, lockPath string, c *Credentials) (*Credentials, error) {
+	if err := config.EnsureDir(filepath.Dir(lockPath)); err != nil {
+		return nil, err
+	}
+	unlock, err := lockFile(ctx, lockPath)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	old, lerr := store.Load()
+	if lerr != nil {
+		old = nil
+	}
+	if err := store.Save(c); err != nil {
+		return nil, err
+	}
+	return old, nil
+}
+
+// RemoveLocked deletes the stored credentials under the refresh lock and
+// returns what was stored (loadErr reports why it could not be read). Like
+// SwapLocked, this guarantees the returned refresh token is the current one.
+func RemoveLocked(ctx context.Context, store Store, lockPath string) (old *Credentials, loadErr, deleteErr error) {
+	if err := config.EnsureDir(filepath.Dir(lockPath)); err != nil {
+		return nil, nil, err
+	}
+	unlock, err := lockFile(ctx, lockPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer unlock()
+	old, loadErr = store.Load()
+	if loadErr != nil {
+		old = nil
+	}
+	return old, loadErr, store.Delete()
 }

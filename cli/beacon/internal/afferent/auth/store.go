@@ -102,13 +102,20 @@ func (s *FallbackStore) warn(err error) {
 
 func (s *FallbackStore) Load() (*Credentials, error) {
 	c, err := s.Primary.Load()
-	if err == nil {
-		return c, nil
+	if err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			s.warn(fmt.Errorf("%s: %w", s.Primary.Name(), err))
+		}
+		return s.Secondary.Load()
 	}
-	if !errors.Is(err, ErrNotFound) {
-		s.warn(fmt.Errorf("%s: %w", s.Primary.Name(), err))
+	// A file copy exists only when a Primary write failed (or the cleanup
+	// after a successful one did). If Save could not also remove the older
+	// Primary item, prefer whichever copy is newer: the stale one may hold a
+	// refresh token that has already been rotated away.
+	if fc, ferr := s.Secondary.Load(); ferr == nil && fc.Expiry.After(c.Expiry) {
+		return fc, nil
 	}
-	return s.Secondary.Load()
+	return c, nil
 }
 
 func (s *FallbackStore) Save(c *Credentials) error {
@@ -121,7 +128,15 @@ func (s *FallbackStore) Save(c *Credentials) error {
 		return nil
 	}
 	s.warn(fmt.Errorf("%s: %w; storing credentials in %s instead", s.Primary.Name(), err, s.Secondary.Name()))
-	return s.Secondary.Save(c)
+	if err := s.Secondary.Save(c); err != nil {
+		return err
+	}
+	// Load tries Primary first, so an older Primary item would shadow the
+	// credentials just written to the file. Remove it.
+	if derr := s.Primary.Delete(); derr != nil && !errors.Is(derr, ErrNotFound) {
+		s.warn(fmt.Errorf("%s: could not remove the older item: %w", s.Primary.Name(), derr))
+	}
+	return nil
 }
 
 func (s *FallbackStore) Delete() error {

@@ -193,3 +193,38 @@ func TestVersionAndHelp(t *testing.T) {
 		}
 	}
 }
+
+// logout and login must not send a refresh token to an issuer or client that
+// did not issue it.
+func TestLogoutAndLoginDoNotRevokeAcrossClients(t *testing.T) {
+	h := newHarness(t)
+	if _, _, err := h.run("login", "--no-browser"); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := h.store().Load()
+
+	// Logging in as another client replaces the session without revoking the
+	// old refresh token at a client it was not issued to.
+	_, errOut, err := h.run("login", "--no-browser", "--client-id", "other-cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.authsrv.Revoked) != 0 || !strings.Contains(errOut, "without revoking") {
+		t.Fatalf("revoked %v; stderr %q", h.authsrv.Revoked, errOut)
+	}
+	if !h.authsrv.RefreshValid(first.RefreshToken) {
+		t.Fatal("first session was revoked")
+	}
+
+	// Now stored creds are other-cli's; logout configured as afferent-cli.
+	_, errOut, err = h.run("logout", "--client-id", "afferent-cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.authsrv.Revoked) != 0 || !strings.Contains(errOut, "not revoking") {
+		t.Fatalf("revoked %v; stderr %q", h.authsrv.Revoked, errOut)
+	}
+	if _, err := h.store().Load(); !errors.Is(err, auth.ErrNotFound) {
+		t.Fatalf("credentials remain after logout: %v", err)
+	}
+}

@@ -174,6 +174,31 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
+// noRedirectClient is httpClient with redirects refused. Token, device and
+// revocation POSTs carry a refresh token or device code in the body; a 307/308
+// would re-send it to the Location URL, bypassing the https-or-loopback check
+// the configured endpoints passed.
+func (c *Client) noRedirectClient() *http.Client {
+	hc := *c.httpClient()
+	hc.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		return fmt.Errorf("refusing to follow redirect to %s", req.URL.Redacted())
+	}
+	return &hc
+}
+
+// checkedRedirectClient is httpClient with every redirect target held to the
+// same https-or-loopback rule as the configured URLs.
+func (c *Client) checkedRedirectClient() *http.Client {
+	hc := *c.httpClient()
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return config.CheckURL("redirect", req.URL.String())
+	}
+	return &hc
+}
+
 func (c *Client) now() time.Time {
 	if c.Now != nil {
 		return c.Now()
@@ -201,7 +226,7 @@ func (c *Client) getJSON(ctx context.Context, u string, out any) error {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.httpClient().Do(req)
+	resp, err := c.checkedRedirectClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -240,7 +265,7 @@ func (c *Client) postForm(ctx context.Context, u string, form url.Values, out an
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.httpClient().Do(req)
+	resp, err := c.noRedirectClient().Do(req)
 	if err != nil {
 		return err
 	}

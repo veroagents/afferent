@@ -40,6 +40,9 @@ type Authsrv struct {
 	RefreshDelay time.Duration
 	// Claims are added to every issued access token.
 	Claims map[string]any
+	// RefreshError, when set, is the OAuth error code every refresh returns
+	// (for example unsupported_grant_type from an authsrv without D2).
+	RefreshError string
 
 	mu            sync.Mutex
 	polls         int
@@ -171,6 +174,10 @@ func (a *Authsrv) token(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
+		if a.RefreshError != "" {
+			oauthErr(w, 400, a.RefreshError, "")
+			return
+		}
 		rt := f.Get("refresh_token")
 		if !a.validRefresh[rt] {
 			oauthErr(w, 400, "invalid_grant", "refresh token revoked, expired or reused")

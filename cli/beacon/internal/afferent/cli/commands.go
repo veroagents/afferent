@@ -55,13 +55,20 @@ func (a *app) loginCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			old, _ := r.store.Load()
-			if err := auth.SaveLocked(ctx, r.store, r.lock, creds); err != nil {
+			// Read the previous session under the same lock as the write, so
+			// a refresh in another process cannot rotate it in between.
+			old, err := auth.SwapLocked(ctx, r.store, r.lock, creds)
+			if err != nil {
 				return fmt.Errorf("store credentials: %w", err)
 			}
-			// End the previous session on this machine, if any.
+			// End the previous session on this machine, if any. Only send its
+			// refresh token to the issuer and client that issued it.
 			if old != nil && old.RefreshToken != "" && old.RefreshToken != creds.RefreshToken {
-				_ = r.client.Revoke(ctx, ep, old.RefreshToken, "refresh_token")
+				if old.Matches(ep.Issuer, r.cfg.ClientID) {
+					_ = r.client.Revoke(ctx, ep, old.RefreshToken, "refresh_token")
+				} else {
+					fmt.Fprintf(a.env.Stderr, "warning: replaced a session for %s (client %s) without revoking it; it stays valid until it expires\n", old.Issuer, old.ClientID)
+				}
 			}
 			// Remember the settings this login used, so later commands (and
 			// the forwarder) find these credentials without the same flags.
@@ -95,23 +102,33 @@ func (a *app) logoutCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			creds, err := r.store.Load()
-			if errors.Is(err, auth.ErrNotFound) {
+			// Take the credentials and delete them under the refresh lock, so
+			// the refresh token revoked below is the current one.
+			creds, lerr, derr := auth.RemoveLocked(ctx, r.store, r.lock)
+			if errors.Is(lerr, auth.ErrNotFound) && (derr == nil || errors.Is(derr, auth.ErrNotFound)) {
 				fmt.Fprintln(a.env.Stdout, "Not signed in.")
 				return nil
 			}
-			if err != nil {
-				fmt.Fprintf(a.env.Stderr, "warning: could not read stored credentials: %v\n", err)
+			if lerr != nil && !errors.Is(lerr, auth.ErrNotFound) {
+				fmt.Fprintf(a.env.Stderr, "warning: could not read stored credentials: %v\n", lerr)
 			}
 			if creds != nil && creds.RefreshToken != "" {
-				if ep, derr := r.client.Discover(ctx); derr != nil {
-					fmt.Fprintf(a.env.Stderr, "warning: could not revoke the session on the server: %v\n", derr)
-				} else if rerr := r.client.Revoke(ctx, ep, creds.RefreshToken, "refresh_token"); rerr != nil {
-					fmt.Fprintf(a.env.Stderr, "warning: could not revoke the session on the server: %v\n", rerr)
+				ep, discErr := r.client.Discover(ctx)
+				switch {
+				case discErr != nil:
+					fmt.Fprintf(a.env.Stderr, "warning: could not revoke the session on the server: %v\n", discErr)
+				case !creds.Matches(ep.Issuer, r.cfg.ClientID):
+					// Never send a refresh token to an issuer or client that
+					// did not issue it.
+					fmt.Fprintf(a.env.Stderr, "warning: the stored session belongs to %s (client %s), not %s (client %s); not revoking it on the server\n", creds.Issuer, creds.ClientID, ep.Issuer, r.cfg.ClientID)
+				default:
+					if rerr := r.client.Revoke(ctx, ep, creds.RefreshToken, "refresh_token"); rerr != nil {
+						fmt.Fprintf(a.env.Stderr, "warning: could not revoke the session on the server: %v\n", rerr)
+					}
 				}
 			}
-			if err := auth.DeleteLocked(ctx, r.store, r.lock); err != nil && !errors.Is(err, auth.ErrNotFound) {
-				return fmt.Errorf("delete credentials: %w", err)
+			if derr != nil && !errors.Is(derr, auth.ErrNotFound) {
+				return fmt.Errorf("delete credentials: %w", derr)
 			}
 			fmt.Fprintln(a.env.Stdout, "Signed out.")
 			return nil

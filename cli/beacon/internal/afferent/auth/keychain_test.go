@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeSecurity emulates the subset of /usr/bin/security the store uses.
@@ -15,6 +16,8 @@ type fakeSecurity struct {
 	items map[string]string // service|account -> password
 	argvs [][]string
 	fail  error // returned by every call when set
+	// failAdd / failDelete fail only writes / deletes.
+	failAdd, failDelete error
 }
 
 func newFakeSecurity() *fakeSecurity { return &fakeSecurity{items: map[string]string{}} }
@@ -27,6 +30,9 @@ func (f *fakeSecurity) Run(_ context.Context, stdin []byte, args ...string) ([]b
 		return nil, f.fail
 	}
 	if len(args) == 1 && args[0] == "-i" {
+		if f.failAdd != nil {
+			return nil, f.failAdd
+		}
 		// Parse "add-generic-password -U -s "svc" -a "acct" -w secret".
 		fields := strings.Fields(strings.TrimSpace(string(stdin)))
 		if len(fields) == 0 || fields[0] != "add-generic-password" {
@@ -62,6 +68,9 @@ func (f *fakeSecurity) Run(_ context.Context, stdin []byte, args ...string) ([]b
 		}
 		return []byte(v + "\n"), nil
 	case "delete-generic-password":
+		if f.failDelete != nil {
+			return nil, f.failDelete
+		}
 		if _, ok := f.items[key]; !ok {
 			return nil, ErrNotFound
 		}
@@ -152,5 +161,45 @@ func TestFallbackStorePrefersKeychainAndRemovesStaleFile(t *testing.T) {
 	}
 	if c, err := s.Load(); err != nil || c.AccessToken != "new" {
 		t.Fatalf("%v %+v", err, c)
+	}
+}
+
+// A failed Keychain write must not leave an older Keychain item shadowing the
+// newer credentials that went to the file.
+func TestFallbackStoreKeychainWriteFailureDoesNotResurrectStaleItem(t *testing.T) {
+	now := time.Now()
+	stale := &Credentials{AccessToken: "old-at", RefreshToken: "spent-rt", Expiry: now.Add(-time.Minute)}
+	fresh := &Credentials{AccessToken: "new-at", RefreshToken: "new-rt", Expiry: now.Add(15 * time.Minute)}
+
+	for _, tc := range []struct {
+		name       string
+		failDelete error
+	}{
+		{"stale item removed", nil},
+		{"stale item cannot be removed", errors.New("security: delete failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeSecurity()
+			ks := &KeychainStore{Account: "a|b", Runner: fake}
+			if err := ks.Save(stale); err != nil {
+				t.Fatal(err)
+			}
+			fake.failAdd = errors.New("security: write failed")
+			fake.failDelete = tc.failDelete
+			file := &FileStore{Path: filepath.Join(t.TempDir(), "credentials.json")}
+			s := &FallbackStore{Primary: ks, Secondary: file}
+			if err := s.Save(fresh); err != nil {
+				t.Fatal(err)
+			}
+			c, err := s.Load()
+			if err != nil || c.RefreshToken != "new-rt" {
+				t.Fatalf("load returned stale credentials: %v %+v", err, c)
+			}
+			if tc.failDelete == nil {
+				if _, err := ks.Load(); !errors.Is(err, ErrNotFound) {
+					t.Fatalf("stale keychain item kept: %v", err)
+				}
+			}
+		})
 	}
 }

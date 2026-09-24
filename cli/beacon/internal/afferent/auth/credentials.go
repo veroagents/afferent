@@ -24,6 +24,24 @@ func (c *Credentials) ValidFor(now time.Time, skew time.Duration) bool {
 	return c != nil && c.AccessToken != "" && !c.Expiry.IsZero() && now.Add(skew).Before(c.Expiry)
 }
 
+// Matches reports whether these credentials were issued by issuer (the
+// canonical issuer from discovery) to clientID. Refresh and revocation send
+// the refresh token to the current issuer, so they must only use credentials
+// that came from it; otherwise the token would leak to another server (an
+// OAuth mix-up) or a mismatched invalid_grant would wipe a valid session.
+func (c *Credentials) Matches(issuer, clientID string) bool {
+	return c != nil && c.Issuer != "" && c.Issuer == issuer && c.ClientID == clientID
+}
+
+// ErrOtherIssuer means the stored credentials belong to a different issuer
+// or client than the one configured. They are left in place.
+var ErrOtherIssuer = errors.New("stored credentials belong to a different issuer or client")
+
+func mismatchError(c *Credentials, issuer, clientID string) error {
+	return fmt.Errorf("%w (stored: %s, client %s; configured: %s, client %s): %w",
+		ErrOtherIssuer, c.Issuer, c.ClientID, issuer, clientID, ErrLoginRequired)
+}
+
 // NewCredentials turns a token response into Credentials. It checks that the
 // access token's iss (when it is a JWT carrying one) is the expected issuer,
 // and keeps prevRefresh when the server did not rotate the refresh token.
