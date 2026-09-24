@@ -81,12 +81,20 @@ type memorySearchResult struct {
 	Memories []memorySummary `json:"memories"`
 	Returned int             `json:"returned"`
 	Limit    int             `json:"limit"`
+
+	// afferent: set when the brainsrv backend failed and SQLite answered.
+	Degraded bool `json:"degraded,omitempty"`
 }
 
 type memoryContextResult struct {
 	Context  []memorySummary `json:"context"`
 	Returned int             `json:"returned"`
 	Limit    int             `json:"limit"`
+
+	// afferent: degraded as on memorySearchResult; history holds brainsrv
+	// non-memory recall hits when include_history is set.
+	Degraded bool                  `json:"degraded,omitempty"`
+	History  []learning.HistoryHit `json:"history,omitempty"`
 }
 
 type memorySummary struct {
@@ -377,6 +385,7 @@ func (s *Server) registerTools() {
 			return memoryContextResult{Context: memorySummaries(memories), Returned: len(memories), Limit: query.Limit}, nil
 		},
 	})
+	s.registerBrainsrvTools()
 }
 
 func (s *Server) memoryStore() *learning.Store {

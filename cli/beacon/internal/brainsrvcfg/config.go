@@ -126,6 +126,16 @@ func (c Config) ScopeFor(label string) string {
 	return c.Scope + "." + label
 }
 
+// Covers reports whether scope is the base scope or sits under it. A scope
+// that is not a valid brainsrv scope is never covered, so "base.x" matches
+// but "basex" and "base..x" do not.
+func (c Config) Covers(scope string) bool {
+	if c.Scope == "" || !ValidScope(scope) {
+		return false
+	}
+	return scope == c.Scope || strings.HasPrefix(scope, c.Scope+".")
+}
+
 // ReadKeyFile reads a brainsrv API key from path. The file must be a regular
 // file (symlinks are rejected, checked with Lstat), and on Unix it must be
 // owned by the current user and not readable or writable by group or others

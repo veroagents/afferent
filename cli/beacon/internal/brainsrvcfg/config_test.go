@@ -216,3 +216,26 @@ func TestReadKeyFile(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigCovers(t *testing.T) {
+	c := Config{Scope: "ws.dev.people.m.harness"}
+	for scope, want := range map[string]bool{
+		"ws.dev.people.m.harness":            true,
+		"ws.dev.people.m.harness.repo":       true,
+		"ws.dev.people.m.harness.repo.codex": true,
+		"ws.dev.people.m.harnessx":           false,
+		"ws.dev.people.m":                    false,
+		"ws.dev.people.other.harness":        false,
+		"ws.dev.people.m.harness..repo":      false,
+		"ws.dev.people.m.harness.Repo":       false,
+		"ws.dev.people.m.harness.":           false,
+		"":                                   false,
+	} {
+		if got := c.Covers(scope); got != want {
+			t.Errorf("Covers(%q) = %v, want %v", scope, got, want)
+		}
+	}
+	if (Config{}).Covers("ws") {
+		t.Error("an empty base scope must cover nothing")
+	}
+}

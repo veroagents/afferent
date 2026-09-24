@@ -447,19 +447,22 @@ func (b *BrainsrvBackend) syncAndRecord(ctx context.Context, m asymptoteobserve.
 
 // ---- recall ----------------------------------------------------------------
 
-type brainsrvRecallHit struct {
-	Table      string `json:"table"`
-	ID         string `json:"id"`
-	Text       string `json:"text"`
-	KnownAt    string `json:"known_at"`
-	SrcKind    string `json:"src_kind"`
-	EntityID   string `json:"entity_id"`
-	EntityType string `json:"entity_type"`
-	EntityName string `json:"entity_name"`
+// BrainsrvRecallHit is one ranked /v1/recall result.
+type BrainsrvRecallHit struct {
+	Table      string  `json:"table"`
+	ID         string  `json:"id"`
+	Text       string  `json:"text"`
+	KnownAt    string  `json:"known_at"`
+	SrcKind    string  `json:"src_kind"`
+	EntityID   string  `json:"entity_id"`
+	EntityType string  `json:"entity_type"`
+	EntityName string  `json:"entity_name"`
+	Category   string  `json:"category,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 type brainsrvRecallResponse struct {
-	Results  []brainsrvRecallHit `json:"results"`
+	Results  []BrainsrvRecallHit `json:"results"`
 	Degraded []string            `json:"degraded"`
 }
 
@@ -468,6 +471,23 @@ func (b *BrainsrvBackend) recall(ctx context.Context, scope, query string, k int
 	body := map[string]interface{}{"query": query, "k": k, "mode": "memories"}
 	err := b.do(ctx, http.MethodPost, "/v1/recall", scope, "", body, &res)
 	return res, err
+}
+
+// Recall runs a raw memories-mode recall at scope and returns brainsrv's
+// ranked hits unfiltered, plus brainsrv's own degraded list. scope must be
+// the base scope or sit under it (the experimental MCP recall_brain tool).
+func (b *BrainsrvBackend) Recall(ctx context.Context, scope, query string, k int) ([]BrainsrvRecallHit, []string, error) {
+	if !b.cfg.Covers(scope) {
+		return nil, nil, fmt.Errorf("scope %q is not at or under the base scope %q", scope, b.cfg.Scope)
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, nil, errors.New("query is required")
+	}
+	res, err := b.recall(ctx, scope, strings.TrimSpace(query), k)
+	if err != nil {
+		return nil, nil, err
+	}
+	return res.Results, res.Degraded, nil
 }
 
 // SearchMemories implements MemoryBackend.
@@ -531,7 +551,7 @@ func (b *BrainsrvBackend) searchWithHistory(ctx context.Context, q Query) ([]asy
 
 // memoryForHit maps a beacon.memory hit to a memory: local SQLite by
 // entity_name first, else the entity's current attributes from brainsrv.
-func (b *BrainsrvBackend) memoryForHit(ctx context.Context, scope string, hit brainsrvRecallHit) (asymptoteobserve.LearningMemoryV1, bool, error) {
+func (b *BrainsrvBackend) memoryForHit(ctx context.Context, scope string, hit BrainsrvRecallHit) (asymptoteobserve.LearningMemoryV1, bool, error) {
 	if hit.EntityName != "" {
 		m, ok, err := b.store.GetMemory(hit.EntityName)
 		if err != nil {
