@@ -26,7 +26,7 @@ copyright notice must stay in place.
 | Branch | Role |
 |---|---|
 | `main` | Mirror of upstream `main`. No afferent commits. |
-| `brainsrv` | Working branch: afferent commits on top of upstream. |
+| `brainsrv` | Working branch: afferent commits on top of upstream. Must be the repo default branch so the weekly job can run (see REBASE.md). |
 | `brainsrv-next` | Rebase candidate that the weekly CI job pushes (`.github/workflows/afferent-upstream.yml`). Review it, then promote it. |
 
 ## Documents

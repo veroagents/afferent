@@ -13,7 +13,17 @@
 # Pushing commits that change .github/workflows/** needs a token with the
 # `workflows` scope, which GITHUB_TOKEN never has. Set the optional secret
 # AFFERENT_PUSH_TOKEN (fine-grained PAT: contents + workflows write on this
-# repo) if those pushes get rejected; otherwise GITHUB_TOKEN is used.
+# repo). In practice it is required: every rebased `brainsrv-next` carries a
+# new commit that adds this file, and GITHUB_TOKEN pushes of such commits are
+# refused. Without it the job falls back to GITHUB_TOKEN.
+#
+# Repo prerequisites (GitHub settings, see docs/afferent/REBASE.md):
+# - Actions enabled on the fork.
+# - Default branch = `brainsrv`. `schedule` and the Actions-tab dispatch only
+#   see workflow files on the default branch, and `main` must stay a pure
+#   upstream mirror, so this file never reaches it.
+# - Issues enabled (forks start with issues off). The report is also written
+#   to the job summary, so a disabled tracker does not hide it.
 
 name: afferent upstream drift
 
@@ -128,6 +138,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           UPSTREAM_SHA: ${{ steps.fetch.outputs.sha }}
           CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
+          FETCH_OUTCOME: ${{ steps.fetch.outcome }}
           REBASE_OUTCOME: ${{ steps.rebase.outcome }}
           PUSH_MAIN_OUTCOME: ${{ steps.push_main.outcome }}
           PUSH_NEXT_OUTCOME: ${{ steps.push_next.outcome }}
@@ -135,7 +146,10 @@ jobs:
         run: |
           set -euo pipefail
           today="$(date -u +%Y-%m-%d)"
-          if [ "$REBASE_OUTCOME" = "failure" ]; then
+          if [ "$FETCH_OUTCOME" != "success" ]; then
+            reason="Checkout of \`$WORK_BRANCH\` or fetch of upstream/main failed (fetch step: ${FETCH_OUTCOME:-not run})."
+            files="_n/a_"
+          elif [ "$REBASE_OUTCOME" = "failure" ]; then
             reason="Rebase of \`$WORK_BRANCH\` onto upstream/main conflicted."
             files="$(printf '%s\n' "$CONFLICTS" | sed '/^$/d; s/^/- `/; s/$/`/')"
           elif [ "$PUSH_MAIN_OUTCOME" = "failure" ]; then
@@ -160,6 +174,11 @@ jobs:
           Resolve with the manual procedure in \`docs/afferent/REBASE.md\`.
           EOF
           )"
+
+          # Always leave the report on the run itself, even if the issue
+          # tracker is disabled or the gh calls below fail.
+          printf '## %s: %s\n\n%s\n' "$ISSUE_PREFIX" "$today" "$body" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::${reason}"
 
           existing="$(gh issue list --state open --search "\"$ISSUE_PREFIX\" in:title" \
             --json number,title \

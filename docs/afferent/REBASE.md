@@ -66,11 +66,50 @@ on manual dispatch. It only runs in `veroagents/afferent`.
    non-fast-forward is rejected and fails the job. It then force-pushes the
    rebased result to `brainsrv-next`. It **never pushes `brainsrv`**.
 
+Every failure also writes the same report to the run's job summary and an
+`::error::` annotation, so it is visible even if the issue call fails.
+
 Token note: `GITHUB_TOKEN` cannot push commits that change
-`.github/workflows/**`. If upstream changes a workflow, or `brainsrv-next`
-gets rejected for that reason, add a repo secret `AFFERENT_PUSH_TOKEN`: a
-fine-grained PAT with Contents and Workflows write on this repo. The job uses
-it for checkout and pushes when present. Issues always use `GITHUB_TOKEN`.
+`.github/workflows/**`. Every rebased `brainsrv-next` contains a fresh commit
+that adds `afferent-upstream.yml`, and `main` picks up any upstream workflow
+change, so expect to need a repo secret `AFFERENT_PUSH_TOKEN`: a fine-grained
+PAT with Contents and Workflows write on this repo. The job uses it for
+checkout and pushes when present. Issues always use `GITHUB_TOKEN`.
+
+### Repo prerequisites (GitHub settings, done by hand)
+
+The job does nothing until these are set on `veroagents/afferent`:
+
+1. **Actions enabled.** GitHub disables workflows on a new fork until they are
+   enabled in the Actions tab.
+2. **Default branch = `brainsrv`.** `schedule` only fires, and the Actions tab
+   only offers "Run workflow", for workflow files on the default branch.
+   `main` must stay a pure upstream mirror, so this file never lands there.
+3. **Issues enabled.** Forks start with issues off, and `gh issue create`
+   then fails. The job summary still carries the report.
+4. **`AFFERENT_PUSH_TOKEN`** secret, as above.
+
+Enabling Actions also enables upstream's own workflows. See "Upstream
+workflows on the fork" below.
+
+### Upstream workflows on the fork
+
+These upstream files are never edited here. What would run once Actions is on:
+
+| Workflow | Trigger on the fork | Risk |
+|---|---|---|
+| `ci.yml` | `pull_request`, `push` to `main` | Tests only, no secrets. Runs on the `main` fast-forward (when pushed with the PAT or by hand) and on PRs. Harmless, costs runner minutes (macOS + Windows jobs). |
+| `release-check.yml` | `pull_request` on release paths, `workflow_dispatch` | Build checks, no secrets. Harmless. |
+| `release.yml` | `push` of a `v*` tag | GoReleaser publishes a GitHub release on the fork, then needs `HOMEBREW_TAP_TOKEN` and Apple signing secrets we do not have. Fails part-way, possibly after a release is created on the fork. |
+| `release-extension.yml` | `push` of an `ext-v*` tag, `workflow_dispatch` | Creates a GitHub release on the fork; AMO signing secrets missing. |
+| `npm-publish-sdk.yml` | `push` of an `sdk-js-v*` tag, `workflow_dispatch` | npm trusted publishing (OIDC). Fails because the fork is not a trusted publisher, but should never be tried. |
+| `windows-sandbox.yml` | `workflow_dispatch` only | Needs `ANTHROPIC_API_KEY` and the `windows-sandbox` environment. Only runs if dispatched by hand. |
+
+Rules that keep the release workflows inert: never `git push --tags` or
+`--follow-tags` to `origin` (`git fetch upstream` brings upstream's `v*`,
+`ext-v*` and `sdk-js-v*` tags into the local clone), and never dispatch the
+release or publish workflows. Optionally disable them in the Actions tab
+(`gh workflow disable`); that is a repo setting, not a file edit.
 
 ## Promoting `brainsrv-next` to `brainsrv`
 
