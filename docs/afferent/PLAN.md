@@ -514,21 +514,47 @@ reading and the label sanitizer, and is shared with B3.
   and the `history` hits of the last search.
 
 ### Phase 3 — B2 MCP
-- [ ] `search_memory` / `get_memory_context`: backend results come through
+- [x] `search_memory` / `get_memory_context`: backend results come through
   `ListMemories`. `degraded: true` is set when the fallback ran.
-- [ ] `include_history` (default false) → `get_memory_context` returns a
+- [x] `include_history` (default false) → `get_memory_context` returns a
   `history` array: `{text, table, known_at, src_kind}` from non-memory hits,
   labelled `"source":"brainsrv-episodic"`.
-- [ ] `internal/mcpserver/brainsrv_tools.go` (new):
+- [x] `internal/mcpserver/brainsrv_tools.go` (new):
   - `registerBrainsrvTools()` registers `recall_brain(query, scope?)` **only
     when a backend is configured**, so `HasExpectedTools` and the upstream
     tests don't change
   - the description is marked experimental
   - `scope` must be at or under the base scope; anything else is rejected
-- [ ] Tests:
+- [x] Tests:
   - recall order preserved
   - a failing backend → SQLite fallback + `degraded`
   - `memory_cross_harness_test.go` passes unchanged with no backend
+
+**Phase 3 implementation notes** (as built on `brainsrv`):
+- `server.go` carries only the table's edits: the `degraded`/`history`
+  fields (after a blank line, so gofmt leaves upstream's struct lines alone)
+  and the `registerBrainsrvTools()` call. The `include_history` schema edit
+  was not needed.
+- With a backend configured (`learning.BrainsrvOf` of a fresh
+  `OpenConfigured` store; a broken config or unreadable key counts as none),
+  `registerBrainsrvTools()` swaps the `search_memory` and
+  `get_memory_context` handlers in place (list order unchanged) for copies in
+  `brainsrv_tools.go` that read `learning.BackendState` of the store they
+  used. Without one, tools, schemas and handlers are exactly upstream's.
+  Drift guard: `TestBrainsrvMemoryToolsMatchUpstreamShape` compares the
+  fallback output with upstream's handler output field for field.
+- `include_history` is added to `get_memory_context`'s schema only when a
+  backend is configured. History is capped at the context limit (5) and each
+  text is trimmed like memory bodies (1200 chars).
+- A listing without `q`/`task` never calls the backend (B1's hook), so it
+  never reports `degraded`.
+- `recall_brain(query, scope?, limit?)`: `scope` defaults to the base scope
+  and must pass `brainsrvcfg.Config.Covers` (valid ltree, equal to the base or
+  `<base>.` prefixed), checked before any request. Returns brainsrv's ranked
+  hits unfiltered (memories and history together) and brainsrv's own
+  `degraded` list as `brainsrv_degraded`. `limit` (default 8, max 20) is the
+  recall `k`.
+
 
 ### Phase 5 — B3 forwarder
 New package `internal/endpoint/brainsrv/`, cloned from `asymptote/` without
