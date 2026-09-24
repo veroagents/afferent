@@ -418,7 +418,7 @@ failure:**
 | `cmd/memory.go` | `memoryStore()` → `learning.OpenConfigured(logPath)` |
 | `internal/mcpserver/server.go` | `memoryStore()` → `OpenConfigured`; `registerBrainsrvTools()` call in `registerTools`; `degraded`/`history` fields on 2 result structs; `include_history` in 2 input schemas |
 | `internal/endpoint/dashboard/memory.go` | `learning.Open` → `learning.OpenConfigured` |
-| `internal/endpoint/service/forwarder.go` | optional `Label`/`SystemdUnit`/`Description` on `ForwarderManager` |
+| `internal/endpoint/service/forwarder.go` | optional `LaunchdLabel`/`SystemdUnit`/`Description` on `ForwarderManager` (every `ForwarderLabel`/`ForwarderSystemdUnit` use becomes a defaulting accessor) |
 
 ### Phase 2 — B1 memory backend
 

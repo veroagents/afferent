@@ -141,7 +141,7 @@ is a review failure:**
 | `cmd/memory.go` | `memoryStore()` → `learning.OpenConfigured(logPath)` |
 | `internal/mcpserver/server.go` | `memoryStore()` → `OpenConfigured`; `registerBrainsrvTools()` call in `registerTools`; `degraded`/`history` fields on 2 result structs; `include_history` in 2 input schemas |
 | `internal/endpoint/dashboard/memory.go` | `learning.Open` → `learning.OpenConfigured` |
-| `internal/endpoint/service/forwarder.go` | optional `Label`/`SystemdUnit`/`Description` on `ForwarderManager` |
+| `internal/endpoint/service/forwarder.go` | optional `LaunchdLabel`/`SystemdUnit`/`Description` on `ForwarderManager` (every `ForwarderLabel`/`ForwarderSystemdUnit` use becomes a defaulting accessor) |
 
 A quick check a reviewer can run. Every path it prints must be a new file
 (`A`) or appear in the table above:
