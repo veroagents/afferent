@@ -86,6 +86,31 @@ agents ──────────── authsrv token ───────�
 end-to-end with a real token. D2 is needed before D6 can run unattended. Then
 D7 and D8.
 
+**Live test, 2026-09-24 (vero-local).** D1 was done locally only, by
+inserting the `afferent-cli` row the same way migration 017 seeds
+`deviced-cli`. It still needs to become a real authsrv migration.
+- ✅ Device login as `drew@vero.localhost`, approved in the browser. The token
+  has `aud=brainsrv`, `sub`, `tenant_id`, `account_id`, `email`,
+  `principal_type=user` and a 15-min expiry.
+- ✅ brainsrv verifies the token through the global JWKS. With
+  `X-Context: afferent-poc`, `auth_config` set to `autoprovision=claim_gated`
+  (on `tenant_id`) and a grant template (`tenant_id` ⇒
+  `ws.dev.people.drew.harness`, read+write):
+  - `/v1/recall` returns 200 with this project's captured turns;
+  - `/v1/ingest/beacon/runtime` returns 200 (`accepted 3`);
+  - a scope outside the grant returns 403;
+  - `/mcp` initialize returns 200 with an `Mcp-Session-Id`.
+  
+  Without the auth_config, the answer is 401; in `vero`, which has no grant,
+  it is 403.
+- ❌ **The refresh token is confirmed unusable.** `/oauth/token` answers
+  `unsupported_grant_type`, and `/oauth2/token` answers `invalid_grant`, so D2
+  is required.
+- Note: Beacon sessions are keyed per principal, so the same events sent with
+  a JWT principal open a new session and do not count as duplicates of the
+  earlier API-key run. That is expected, but it matters when moving a user
+  from an API key to OAuth: re-sent history is ingested again.
+
 **Test plan:** each step is tested live on vero-local with a real browser
 approval. The first test is D1 + D5: device login as `drew@vero.localhost`,
 decode the claims, and call brainsrv with the JWT.
