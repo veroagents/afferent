@@ -6,6 +6,7 @@ loads nothing from the network.
 | File | What |
 |---|---|
 | `index.html` | the page shell (no inline script or style: the CSP forbids both) |
+| `mapdata.js` | the treemap's data tree from `/v1/overview` (pure, tested under node by `go test`) |
 | `app.js` | the page logic: status strip, brain map (treemap), knowledge graph, search, side panel |
 | `app.css` | styles, dark by default, light under `prefers-color-scheme: light` |
 | `d3.v7.min.js` | vendored d3, see below |

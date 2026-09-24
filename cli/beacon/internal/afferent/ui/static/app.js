@@ -303,14 +303,23 @@
   }
 
   function tileLines(d) {
+    if (d.data.synthetic) {
+      return [
+        d.data.scope,
+        fmtInt(d.data.turns) + ' turns in scopes brainsrv did not list',
+        'brainsrv caps the map (200 children per scope, and a total node budget)',
+      ];
+    }
     return [
       d.data.scope,
       fmtInt(d.data.turns) + ' turns · ' + fmtInt(d.data.sessions) + ' sessions',
       fmtInt(d.data.entities) + ' entities · ' + fmtInt(d.data.facts) + ' facts · ' + fmtInt(d.data.relations) + ' relations',
       'last activity ' + ago(d.data.last_activity),
-      d.data.truncated ? 'children truncated at 200' : null,
+      d.data.truncated ? 'some child scopes not listed (brainsrv limit)' : null,
     ];
   }
+
+  const MAP_HINT = 'tile size = turns · color = last activity';
 
   function renderMap() {
     const box = $('map');
@@ -330,7 +339,10 @@
     }
     const W = Math.max(200, box.clientWidth);
     const H = Math.max(200, box.clientHeight);
-    const rootData = { scope: ov.scope, label: lastLabel(ov.scope), turns: total, children: children };
+    const tree = window.AfferentMap.buildMapTree(ov);
+    const rootData = tree.root;
+    rootData.label = lastLabel(ov.scope);
+    $('map-hint').textContent = MAP_HINT + (tree.truncated ? ' · some scopes not listed (brainsrv limit)' : '');
     const root = d3.hierarchy(rootData, (d) => d.children && d.children.length ? d.children : null)
       .sum((d) => {
         // A node's turns include its children's; count only what is left over.
@@ -349,7 +361,7 @@
       .attr('aria-label', 'Treemap of scopes by turns');
     const nodes = root.descendants().filter((d) => d.depth >= 1 && d.x1 - d.x0 > 1 && d.y1 - d.y0 > 1);
     const g = svg.selectAll('g').data(nodes).join('g')
-      .attr('class', (d) => 'tile ' + (d.children ? 'group' : 'leaf'))
+      .attr('class', (d) => 'tile ' + (d.children ? 'group' : 'leaf') + (d.data.synthetic ? ' not-listed' : ''))
       .attr('transform', (d) => `translate(${d.x0},${d.y0})`);
 
     g.append('rect')
@@ -380,7 +392,7 @@
         sel.append('text').attr('class', 't-meta').attr('x', 6).attr('y', 31).attr('fill', color)
           .text(clip(fmtInt(d.data.turns) + ' turns', maxChars));
       }
-      if (h > 50) {
+      if (h > 50 && !d.data.synthetic) {
         sel.append('text').attr('class', 't-meta').attr('x', 6).attr('y', 45).attr('fill', color)
           .text(clip(ago(d.data.last_activity), maxChars));
       }
@@ -389,7 +401,7 @@
     g.on('mouseenter', (ev, d) => tip.show(ev, d.data.label || d.data.scope, tileLines(d)))
       .on('mousemove', (ev) => tip.move(ev))
       .on('mouseleave', () => tip.hide())
-      .on('click', (ev, d) => { ev.stopPropagation(); selectScope(d.data); });
+      .on('click', (ev, d) => { ev.stopPropagation(); if (!d.data.synthetic) selectScope(d.data); });
 
     box.replaceChildren(svg.node());
     applyMapMarks();
@@ -402,8 +414,8 @@
     const isHit = (scope) => hitScopes.some((h) => h === scope || h.startsWith(scope + '.') || scope.startsWith(h + '.'));
     svg.classed('map-dim', hitScopes.length > 0);
     svg.selectAll('.tile')
-      .classed('selected', (d) => state.selectedScope === d.data.scope)
-      .classed('hit', (d) => !d.children && hitScopes.length > 0 && isHit(d.data.scope));
+      .classed('selected', (d) => !d.data.synthetic && state.selectedScope === d.data.scope)
+      .classed('hit', (d) => !d.children && !d.data.synthetic && hitScopes.length > 0 && isHit(d.data.scope));
   }
 
   async function loadOverview() {

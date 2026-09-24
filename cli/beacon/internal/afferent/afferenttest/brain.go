@@ -32,6 +32,10 @@ type Brain struct {
 	RedirectTo string
 	// RejectTokens are refused with 401.
 	RejectTokens map[string]bool
+	// MaxChildren, when positive, cuts every overview node's children to
+	// the first MaxChildren by turns and marks that node truncated, as
+	// brainsrv does at 200 (the cut children's turns stay in the parent's).
+	MaxChildren int
 
 	mu       sync.Mutex
 	Requests []BrainRequest
@@ -387,16 +391,21 @@ func (b *Brain) overview(scope string, depth int) map[string]any {
 	for _, ed := range b.edges {
 		walk(byID[ed["src"].(string)].Scope, func(a *agg) { a.relations++ })
 	}
-	var render func(a *agg) []map[string]any
-	render = func(a *agg) []map[string]any {
+	var render func(a *agg) ([]map[string]any, bool)
+	render = func(a *agg) ([]map[string]any, bool) {
 		out := []map[string]any{}
 		for label, k := range a.kids {
 			var last any
 			if !k.last.IsZero() {
 				last = k.last
 			}
-			out = append(out, map[string]any{"scope": k.scope, "label": label, "sessions": k.sessions, "turns": k.turns,
-				"entities": k.entities, "facts": k.facts, "relations": k.relations, "last_activity": last, "children": render(k)})
+			kids, cut := render(k)
+			n := map[string]any{"scope": k.scope, "label": label, "sessions": k.sessions, "turns": k.turns,
+				"entities": k.entities, "facts": k.facts, "relations": k.relations, "last_activity": last, "children": kids}
+			if cut {
+				n["truncated"] = true
+			}
+			out = append(out, n)
 		}
 		sort.Slice(out, func(i, j int) bool {
 			ti, tj := out[i]["turns"].(int), out[j]["turns"].(int)
@@ -405,14 +414,22 @@ func (b *Brain) overview(scope string, depth int) map[string]any {
 			}
 			return out[i]["label"].(string) < out[j]["label"].(string)
 		})
-		return out
+		if b.MaxChildren > 0 && len(out) > b.MaxChildren {
+			return out[:b.MaxChildren], true
+		}
+		return out, false
 	}
-	return map[string]any{
+	kids, cut := render(root)
+	out := map[string]any{
 		"scope": scope, "generated_at": b.Now,
 		"totals": map[string]int{"sessions": root.sessions, "turns": root.turns, "entities": root.entities,
 			"facts": root.facts, "relations": root.relations, "pending_extraction": pending},
-		"children": render(root),
+		"children": kids,
 	}
+	if cut {
+		out["truncated"] = true
+	}
+	return out
 }
 
 func (b *Brain) graph(scope string, limit int) map[string]any {

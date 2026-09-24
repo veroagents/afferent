@@ -49,7 +49,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/brain"
 )
 
-//go:embed static/index.html static/app.js static/app.css static/d3.v7.min.js
+//go:embed static/index.html static/app.js static/mapdata.js static/app.css static/d3.v7.min.js
 var staticFS embed.FS
 
 // KeyHeader carries the per-launch key on every /api request.
@@ -197,6 +197,7 @@ var static = map[string]struct{ file, ctype string }{
 	"/":             {"static/index.html", "text/html; charset=utf-8"},
 	"/index.html":   {"static/index.html", "text/html; charset=utf-8"},
 	"/app.js":       {"static/app.js", "text/javascript; charset=utf-8"},
+	"/mapdata.js":   {"static/mapdata.js", "text/javascript; charset=utf-8"},
 	"/app.css":      {"static/app.css", "text/css; charset=utf-8"},
 	"/d3.v7.min.js": {"static/d3.v7.min.js", "text/javascript; charset=utf-8"},
 }

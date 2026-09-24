@@ -177,6 +177,7 @@ button:disabled { opacity: 0.6; cursor: default; }
 .tile.selected > rect { stroke: var(--accent); stroke-width: 3; }
 .map-dim .tile.leaf:not(.hit) > rect { opacity: 0.3; }
 .tile.hit > rect { stroke: var(--accent); stroke-width: 3; }
+.tile.not-listed > rect { cursor: default; stroke: var(--muted); stroke-dasharray: 4 3; }
 
 /* Graph */
 .links line { stroke: var(--edge); stroke-linecap: round; }

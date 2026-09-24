@@ -228,7 +228,7 @@ func TestUICommandSignedOut(t *testing.T) {
 
 // TestUIDemo serves the page with fake data for a manual look or a headless
 // screenshot. It runs only with AFFERENT_UI_DEMO=<duration>, and writes the
-// URL to AFFERENT_UI_DEMO_URLFILE when set. AFFERENT_UI_DEMO_MODE=empty,
+// URL to AFFERENT_UI_DEMO_URLFILE when set. AFFERENT_UI_DEMO_MODE=empty, truncated,
 // signedout or down shows those states. It uses temp dirs and fakes only.
 func TestUIDemo(t *testing.T) {
 	d := os.Getenv("AFFERENT_UI_DEMO")
@@ -252,6 +252,8 @@ func TestUIDemo(t *testing.T) {
 		}
 	case "down":
 		brain.Server.Close()
+	case "truncated":
+		brain.MaxChildren = 2
 	}
 	fmt.Println("DEMO URL:", u)
 	if f := os.Getenv("AFFERENT_UI_DEMO_URLFILE"); f != "" {

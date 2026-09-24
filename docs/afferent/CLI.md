@@ -525,7 +525,8 @@ AFFERENT_UI_DEMO=5m AFFERENT_UI_DEMO_URLFILE=/tmp/ui-url go test -run TestUIDemo
   --window-size=1400,900 --virtual-time-budget=8000 --screenshot=ui.png "$(cat /tmp/ui-url)"
 ```
 
-`AFFERENT_UI_DEMO_MODE=empty`, `signedout` or `down` shows those states.
+`AFFERENT_UI_DEMO_MODE=empty`, `truncated` (brainsrv cut the tree),
+`signedout` or `down` shows those states.
 
 ## setup (D7)
 

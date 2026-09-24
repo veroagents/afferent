@@ -152,7 +152,7 @@ func TestURLCarriesKeyInFragment(t *testing.T) {
 
 func TestSecurityHeadersAndStatic(t *testing.T) {
 	f := newFixture(t, nil)
-	for _, p := range []string{"/", "/app.js", "/app.css", "/d3.v7.min.js", "/api/status"} {
+	for _, p := range []string{"/", "/app.js", "/mapdata.js", "/app.css", "/d3.v7.min.js", "/api/status"} {
 		r := f.get(p)
 		if r.status != 200 {
 			t.Fatalf("%s: %d %s", p, r.status, r.body)
