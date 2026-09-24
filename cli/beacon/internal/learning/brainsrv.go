@@ -211,10 +211,27 @@ func (b *BrainsrvBackend) searchScope(q Query) (scope, projectID string, ok bool
 		return "", "", false, err
 	}
 	project, found, err := b.projectByID(scoped.ProjectID)
-	if err != nil || !found {
+	if err != nil {
 		return "", "", false, err
 	}
+	if !found {
+		// A project this store has never seen (a fresh machine) is still
+		// searchable when it is the repository this process runs in: that is
+		// resolved from disk by the process itself, never from a request path,
+		// so the ProjectPath trust boundary holds.
+		current, cerr := resolveCurrentProject()
+		if cerr != nil || current.ID == "" || current.ID != scoped.ProjectID {
+			return "", "", false, nil
+		}
+		project = current
+	}
 	return b.cfg.ScopeFor(projectLabel(project)), scoped.ProjectID, true, nil
+}
+
+// resolveCurrentProject is the repository this process runs in (the MCP
+// server's working directory). A variable so tests can stand in for the disk.
+var resolveCurrentProject = func() (asymptoteobserve.LearningProjectV1, error) {
+	return ResolveProject("")
 }
 
 // projectByID returns the full project record the store holds for id.

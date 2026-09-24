@@ -331,3 +331,51 @@ func memoryIDs(ms []asymptoteobserve.LearningMemoryV1) []string {
 	}
 	return ids
 }
+
+// A fresh machine's store has never seen the repository, but the MCP server
+// runs inside it: memories approved elsewhere must still be found. A project
+// ID that is not the process's own repository still derives no scope.
+func TestBrainsrvSearchOnFreshMachineUsesCurrentRepository(t *testing.T) {
+	quietBackendLog(t)
+	fake := newFakeBrainsrv(t)
+	repo := asymptoteobserve.LearningProjectV1{ID: "p-x", Path: "/src/x", RemoteURL: "git@github.com:acme/x.git"}
+	machineA := brainsrvStore(filepath.Join(t.TempDir(), "memory.db"), fake.server.URL)
+	if err := machineA.PutMemory(testMemory("memory_x", repo, "flaky tests in x")); err != nil {
+		t.Fatal(err)
+	}
+	eid := fake.entities["memory_x"]
+	fake.recallHits = []map[string]interface{}{memoryHit(eid, "memory_x", "summary")}
+	fake.entityView[eid] = map[string]interface{}{
+		"id": eid, "type": "beacon.memory", "name": "memory_x", "state": "active", "scope": testBaseScope + ".x",
+		"attributes": map[string]interface{}{
+			"title":   map[string]interface{}{"value": "flaky tests in x", "value_type": "text", "valid_from": "2026-09-20T00:00:00Z", "confidence": 1},
+			"project": map[string]interface{}{"value": repo, "value_type": "json", "valid_from": "2026-09-20T00:00:00Z", "confidence": 1},
+		},
+	}
+
+	machineB := brainsrvStore(filepath.Join(t.TempDir(), "memory.db"), fake.server.URL)
+	prev := resolveCurrentProject
+	t.Cleanup(func() { resolveCurrentProject = prev })
+
+	resolveCurrentProject = func() (asymptoteobserve.LearningProjectV1, error) {
+		return asymptoteobserve.LearningProjectV1{ID: "p-other", Path: "/src/other"}, nil
+	}
+	fake.Reset()
+	got, err := machineB.ListMemories(Query{ProjectID: "p-x", Q: "flaky"})
+	if err != nil || len(got) != 0 || len(fake.Calls()) != 0 {
+		t.Fatalf("unknown non-current project: got %v err %v calls %d, want no recall", memoryIDs(got), err, len(fake.Calls()))
+	}
+
+	resolveCurrentProject = func() (asymptoteobserve.LearningProjectV1, error) { return repo, nil }
+	fake.Reset()
+	got, err = machineB.ListMemories(Query{ProjectID: "p-x", Q: "flaky"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "memory_x" {
+		t.Fatalf("fresh machine search = %v, want memory_x", memoryIDs(got))
+	}
+	if calls := fake.Calls(); len(calls) == 0 || calls[0].Scope != testBaseScope+".x" {
+		t.Fatalf("recall calls = %#v, want scope %s.x", calls, testBaseScope)
+	}
+}
