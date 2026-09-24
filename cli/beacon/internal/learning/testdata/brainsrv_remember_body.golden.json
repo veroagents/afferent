@@ -1,0 +1,89 @@
+{
+  "facts": {
+    "trust": 0.9,
+    "valid_from": "2026-09-24T10:11:12.5Z",
+    "entities": [
+      {
+        "local_id": "m",
+        "name": "memory_golden",
+        "type": "beacon.memory"
+      }
+    ],
+    "attributes": [
+      {
+        "entity": "m",
+        "predicate": "summary",
+        "value": "Run the package smoke twice\n\nThe first run warms the cache.\n\nApplies when: package smoke is flaky",
+        "value_type": "text"
+      },
+      {
+        "entity": "m",
+        "predicate": "title",
+        "value": "Run the package smoke twice",
+        "value_type": "text"
+      },
+      {
+        "entity": "m",
+        "predicate": "body",
+        "value": "The first run warms the cache.",
+        "value_type": "text"
+      },
+      {
+        "entity": "m",
+        "predicate": "kind",
+        "value": "debugging_pattern",
+        "value_type": "text"
+      },
+      {
+        "entity": "m",
+        "predicate": "applicability",
+        "value": "package smoke is flaky",
+        "value_type": "text"
+      },
+      {
+        "entity": "m",
+        "predicate": "tags",
+        "value": [
+          "smoke",
+          "ci"
+        ],
+        "value_type": "json"
+      },
+      {
+        "entity": "m",
+        "predicate": "candidate_id",
+        "value": "candidate_d8aa4004646aa4860becb723f9ec8541",
+        "value_type": "text"
+      },
+      {
+        "entity": "m",
+        "predicate": "evidence",
+        "value": [
+          {
+            "trace_id": "trace-golden",
+            "event_ids": [
+              "event-1"
+            ]
+          }
+        ],
+        "value_type": "json"
+      },
+      {
+        "entity": "m",
+        "predicate": "project",
+        "value": {
+          "id": "project-1",
+          "path": "/repo",
+          "remote_url": "git@github.com:veroagents/afferent.git"
+        },
+        "value_type": "json"
+      },
+      {
+        "entity": "m",
+        "predicate": "beacon.rubric_hash",
+        "value": "sha256:c5994abb2076e677728ad5380ae738d0370eb9a6c2f6ac882814fe97dc436d97",
+        "value_type": "text"
+      }
+    ]
+  }
+}

@@ -380,7 +380,7 @@ func (s *Server) registerTools() {
 }
 
 func (s *Server) memoryStore() *learning.Store {
-	return learning.Open(learning.PathForRuntimeLog(s.logPath))
+	return learning.OpenConfigured(learning.PathForRuntimeLog(s.logPath))
 }
 
 func (s *Server) parseMemoryQuery(args map[string]interface{}) (learning.Query, error) {

@@ -23,6 +23,7 @@ const (
 
 type Store struct {
 	dbPath string
+	hooks  StoreHooks
 }
 
 // Query selects stored learning records.
@@ -532,10 +533,18 @@ func (s *Store) PutMemory(m asymptoteobserve.LearningMemoryV1) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at, superseded_by = excluded.superseded_by, memory_json = excluded.memory_json`,
 		m.ID, m.CandidateID, m.Project.ID, m.Kind, m.Title, m.CreatedAt, m.UpdatedAt, m.SupersededBy, string(data))
+	if err == nil && s.hooks != nil {
+		s.hooks.AfterPut(m)
+	}
 	return err
 }
 
 func (s *Store) ListMemories(query Query) ([]asymptoteobserve.LearningMemoryV1, error) {
+	if s.hooks != nil && query.Q != "" {
+		if r, ok := s.hooks.Search(query); ok {
+			return r, nil
+		}
+	}
 	query, err := s.scopeQuery(query)
 	if err != nil {
 		return nil, err
@@ -600,6 +609,9 @@ func (s *Store) ListMemories(query Query) ([]asymptoteobserve.LearningMemoryV1, 
 func (s *Store) GetMemory(id string) (asymptoteobserve.LearningMemoryV1, bool, error) {
 	var raw string
 	ok, err := s.getJSON(`SELECT memory_json FROM memories WHERE id = ?`, id, &raw)
+	if err == nil && !ok && s.hooks != nil {
+		return s.hooks.GetMissing(id)
+	}
 	if err != nil || !ok {
 		return asymptoteobserve.LearningMemoryV1{}, ok, err
 	}

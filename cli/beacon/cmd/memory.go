@@ -483,7 +483,7 @@ func printCandidate(cmd *cobra.Command, candidate asymptoteobserve.LearningCandi
 }
 
 func memoryStore() *learning.Store {
-	return learning.Open(learning.PathForRuntimeLog(memoryLogPath()))
+	return learning.OpenConfigured(learning.PathForRuntimeLog(memoryLogPath()))
 }
 
 func memoryLogPath() string {
