@@ -1,0 +1,382 @@
+[
+ {
+  "in": "brainsrv",
+  "kind": "repo",
+  "out": "brainsrv"
+ },
+ {
+  "in": "my_repo",
+  "kind": "repo",
+  "out": "my_repo"
+ },
+ {
+  "in": "My.Repo",
+  "kind": "repo",
+  "out": "my_repo_ce141e7f"
+ },
+ {
+  "in": "my-repo",
+  "kind": "repo",
+  "out": "my_repo_aa38d26c"
+ },
+ {
+  "in": "MyRepo",
+  "kind": "repo",
+  "out": "myrepo"
+ },
+ {
+  "in": "repo123",
+  "kind": "repo",
+  "out": "repo123"
+ },
+ {
+  "in": "https://github.com/vero-social/brainsrv.git",
+  "kind": "repo",
+  "out": "brainsrv"
+ },
+ {
+  "in": "https://github.com/vero-social/brainsrv",
+  "kind": "repo",
+  "out": "brainsrv"
+ },
+ {
+  "in": "https://github.com/vero-social/brainsrv/",
+  "kind": "repo",
+  "out": "brainsrv"
+ },
+ {
+  "in": "http://gitlab.example.com:8443/group/sub/project.git",
+  "kind": "repo",
+  "out": "project"
+ },
+ {
+  "in": "git@github.com:vero-social/brainsrv.git",
+  "kind": "repo",
+  "out": "brainsrv"
+ },
+ {
+  "in": "git@github.com:vero-social/agent-beacon.git",
+  "kind": "repo",
+  "out": "agent_beacon_66f2a14c"
+ },
+ {
+  "in": "git@gitlab.com:toplevel.git",
+  "kind": "repo",
+  "out": "toplevel"
+ },
+ {
+  "in": "ssh://git@github.com/vero-social/brainsrv.git",
+  "kind": "repo",
+  "out": "brainsrv"
+ },
+ {
+  "in": "ssh://git@github.com:22/vero-social/Brain_Srv.git",
+  "kind": "repo",
+  "out": "brain_srv"
+ },
+ {
+  "in": "file:///home/drew/src/afferent",
+  "kind": "repo",
+  "out": "afferent"
+ },
+ {
+  "in": "/Users/drew/projects/afferent",
+  "kind": "repo",
+  "out": "afferent"
+ },
+ {
+  "in": "/Users/drew/projects/afferent/",
+  "kind": "repo",
+  "out": "afferent"
+ },
+ {
+  "in": "/Users/drew/projects/afferent/.git",
+  "kind": "repo",
+  "out": "afferent"
+ },
+ {
+  "in": "C:\\Users\\drew\\src\\Widget",
+  "kind": "repo",
+  "out": "widget"
+ },
+ {
+  "in": "  spaced_repo  ",
+  "kind": "repo",
+  "out": "spaced_repo"
+ },
+ {
+  "in": "__leading_trailing__",
+  "kind": "repo",
+  "out": "leading_trailing_6d370dfe"
+ },
+ {
+  "in": "a__b",
+  "kind": "repo",
+  "out": "a_b_63e5c1c4"
+ },
+ {
+  "in": "a--b..c",
+  "kind": "repo",
+  "out": "a_b_c_18295684"
+ },
+ {
+  "in": "naïve-café",
+  "kind": "repo",
+  "out": "na_ve_caf_7aa270c7"
+ },
+ {
+  "in": "Überprojekt",
+  "kind": "repo",
+  "out": "berprojekt_033872c0"
+ },
+ {
+  "in": "日本語リポジトリ",
+  "kind": "repo",
+  "out": "_empty_5b332715"
+ },
+ {
+  "in": "פרויקט",
+  "kind": "repo",
+  "out": "_empty_627996b3"
+ },
+ {
+  "in": "https://github.com/org/פרויקט-שלי.git",
+  "kind": "repo",
+  "out": "_empty_f0c664b8"
+ },
+ {
+  "in": "emoji🚀repo",
+  "kind": "repo",
+  "out": "emoji_repo_6bf07921"
+ },
+ {
+  "in": "",
+  "kind": "repo",
+  "out": "_empty_e3b0c442"
+ },
+ {
+  "in": "   ",
+  "kind": "repo",
+  "out": "_empty_e3b0c442"
+ },
+ {
+  "in": "---",
+  "kind": "repo",
+  "out": "_empty_cb3f91d5"
+ },
+ {
+  "in": "https://github.com",
+  "kind": "repo",
+  "out": "_empty_e3b0c442"
+ },
+ {
+  "in": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789ab",
+  "kind": "repo",
+  "out": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789ab"
+ },
+ {
+  "in": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789abc",
+  "kind": "repo",
+  "out": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz012_c47aae97"
+ },
+ {
+  "in": "The-Quick-Brown-Fox-Jumps-Over-The-Lazy-Dog-And-Keeps-Running-Far-Away",
+  "kind": "repo",
+  "out": "the_quick_brown_fox_jumps_over_the_lazy_dog_and_keeps_r_71f1e2b6"
+ },
+ {
+  "in": "claude-code",
+  "kind": "harness",
+  "out": "claude_code"
+ },
+ {
+  "in": "claude_code",
+  "kind": "harness",
+  "out": "claude_code"
+ },
+ {
+  "in": "Claude-Code",
+  "kind": "harness",
+  "out": "claude_code"
+ },
+ {
+  "in": "codex",
+  "kind": "harness",
+  "out": "codex"
+ },
+ {
+  "in": "codex-cli",
+  "kind": "harness",
+  "out": "codex_cli"
+ },
+ {
+  "in": "cursor",
+  "kind": "harness",
+  "out": "cursor"
+ },
+ {
+  "in": "gemini-cli",
+  "kind": "harness",
+  "out": "gemini_cli"
+ },
+ {
+  "in": "devin-desktop",
+  "kind": "harness",
+  "out": "devin_desktop"
+ },
+ {
+  "in": "antigravity-cli",
+  "kind": "harness",
+  "out": "antigravity_cli"
+ },
+ {
+  "in": "antigravity_cli",
+  "kind": "harness",
+  "out": "antigravity_cli"
+ },
+ {
+  "in": "claude",
+  "kind": "harness",
+  "out": "claude"
+ },
+ {
+  "in": "claude-cowork",
+  "kind": "harness",
+  "out": "claude_cowork"
+ },
+ {
+  "in": "claude_cowork",
+  "kind": "harness",
+  "out": "claude_cowork"
+ },
+ {
+  "in": "cline",
+  "kind": "harness",
+  "out": "cline"
+ },
+ {
+  "in": "codex_cli",
+  "kind": "harness",
+  "out": "codex_cli"
+ },
+ {
+  "in": "copilot-cli",
+  "kind": "harness",
+  "out": "copilot_cli"
+ },
+ {
+  "in": "copilot_cli",
+  "kind": "harness",
+  "out": "copilot_cli"
+ },
+ {
+  "in": "custom_agent",
+  "kind": "harness",
+  "out": "custom_agent"
+ },
+ {
+  "in": "deepseek_harness",
+  "kind": "harness",
+  "out": "deepseek_harness"
+ },
+ {
+  "in": "devin",
+  "kind": "harness",
+  "out": "devin"
+ },
+ {
+  "in": "devin-cli",
+  "kind": "harness",
+  "out": "devin_cli"
+ },
+ {
+  "in": "factory",
+  "kind": "harness",
+  "out": "factory"
+ },
+ {
+  "in": "gemini",
+  "kind": "harness",
+  "out": "gemini"
+ },
+ {
+  "in": "gemini_cli",
+  "kind": "harness",
+  "out": "gemini_cli"
+ },
+ {
+  "in": "grok",
+  "kind": "harness",
+  "out": "grok"
+ },
+ {
+  "in": "hermes",
+  "kind": "harness",
+  "out": "hermes"
+ },
+ {
+  "in": "kimi-code",
+  "kind": "harness",
+  "out": "kimi_code"
+ },
+ {
+  "in": "kimi_code",
+  "kind": "harness",
+  "out": "kimi_code"
+ },
+ {
+  "in": "kiro",
+  "kind": "harness",
+  "out": "kiro"
+ },
+ {
+  "in": "muse_code",
+  "kind": "harness",
+  "out": "muse_code"
+ },
+ {
+  "in": "openclaw_gateway",
+  "kind": "harness",
+  "out": "openclaw_gateway"
+ },
+ {
+  "in": "opencode",
+  "kind": "harness",
+  "out": "opencode"
+ },
+ {
+  "in": "pi_cli",
+  "kind": "harness",
+  "out": "pi_cli"
+ },
+ {
+  "in": "prime_agent",
+  "kind": "harness",
+  "out": "prime_agent"
+ },
+ {
+  "in": "vercel_fx",
+  "kind": "harness",
+  "out": "vercel_fx"
+ },
+ {
+  "in": "windsurf",
+  "kind": "harness",
+  "out": "windsurf"
+ },
+ {
+  "in": "some-new-harness",
+  "kind": "harness",
+  "out": "some_new_harness_106949e7"
+ },
+ {
+  "in": "newharness",
+  "kind": "harness",
+  "out": "newharness"
+ },
+ {
+  "in": "",
+  "kind": "harness",
+  "out": "_empty_e3b0c442"
+ }
+]
