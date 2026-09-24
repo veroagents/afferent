@@ -424,23 +424,23 @@ failure:**
 
 New package `cli/beacon/internal/brainsrvcfg/`. It holds the config, key-file
 reading and the label sanitizer, and is shared with B3.
-- [ ] Env: `BEACON_MEMORY_BACKEND=brainsrv`, `BEACON_BRAINSRV_URL` (https
+- [x] Env: `BEACON_MEMORY_BACKEND=brainsrv`, `BEACON_BRAINSRV_URL` (https
   required, except `localhost`), `BEACON_BRAINSRV_SCOPE` (validated against the
   brainsrv scope regex), `BEACON_BRAINSRV_KEY_FILE`.
-- [ ] `ReadKeyFile` implements B-8. It must start with `spk_`.
-- [ ] `Label()` + `testdata/labels.json` (§1).
+- [x] `ReadKeyFile` implements B-8. It must start with `spk_`.
+- [x] `Label()` + `testdata/labels.json` (§1).
 
 `internal/learning/backend.go` (new):
-- [ ] `MemoryBackend` interface (SPEC B1).
-- [ ] `OpenConfigured(logPath) *Store`: returns plain `Open(...)` when
+- [x] `MemoryBackend` interface (SPEC B1).
+- [x] `OpenConfigured(logPath) *Store`: returns plain `Open(...)` when
   `BEACON_MEMORY_BACKEND` is unset. If config is present but invalid, log a
   warning and return plain `Open` (never break the CLI).
-- [ ] `StoreHooks` interface (`AfterPut`, `Search`, `GetMissing`) plus the
+- [x] `StoreHooks` interface (`AfterPut`, `Search`, `GetMissing`) plus the
   brainsrv implementation. `OpenConfigured` sets `store.hooks`, which is nil by
   default.
 
 `internal/learning/brainsrv.go` (new) — the HTTP client:
-- [ ] `PutMemory` → `POST /v1/remember`:
+- [x] `PutMemory` → `POST /v1/remember`:
   - header `X-Scope: <base>.<project_label>`
   - header `Idempotency-Key: beacon-memory:<id>`
   - body: **facts only (A-2)**, `trust:0.9`, `valid_from: CreatedAt`
@@ -457,7 +457,7 @@ reading and the label sanitizer, and is shared with B3.
     `Idempotency-Key: beacon-supersede:<old>:<new>` (P-A5).
   - Approve/Supersede already route through `PutMemory` (`candidate.go:74,140`),
     so no edits to `candidate.go` are needed.
-- [ ] `SearchMemories` → `POST /v1/recall {query,k,mode:"memories"}`:
+- [x] `SearchMemories` → `POST /v1/recall {query,k,mode:"memories"}`:
   - Scope: `ProjectPath` → `store.ProjectIDForPath` → project → label. **Never
     derive a scope from the raw request path.** No project → base scope.
   - Keep hits where `entity_type=="beacon.memory"`, deduped by `entity_id`,
@@ -468,20 +468,20 @@ reading and the label sanitizer, and is shared with B3.
   - No state filter on our side. Superseded entities never come back from
     recall (P-A5).
   - Non-memory hits go to the `history` slice (for B2).
-- [ ] `memory_sync` via `ensureSyncSchema()` (B-3): `(memory_id PK, state, attempts, last_error, updated_at)`.
+- [x] `memory_sync` via `ensureSyncSchema()` (B-3): `(memory_id PK, state, attempts, last_error, updated_at)`.
   After a successful local write, a backend error sets the row to `pending` and
   logs it. **Approval never fails.** On success the row is set to `synced`.
-- [ ] The three call-through lines in `store.go`:
+- [x] The three call-through lines in `store.go`:
   - `PutMemory`: after the local write, `if s.hooks != nil { s.hooks.AfterPut(m) }`
   - `ListMemories`: `if s.hooks != nil && q.Q != "" { if r, ok := s.hooks.Search(q); ok { return r, nil } }`.
     The degraded state lives on the hooks value, which is safe because stores
     are created per request.
   - `GetMemory`: on a local miss, `if s.hooks != nil { return s.hooks.GetMissing(id) }`
-- [ ] `cmd/memory_brainsrv.go` (new, self-registering):
+- [x] `cmd/memory_brainsrv.go` (new, self-registering):
   - `beacon memory brainsrv status`: GET health + sync counts
   - `beacon memory brainsrv sync [--all]`: retry pending/failed rows; `--all`
     enqueues every approved memory
-- [ ] Tests:
+- [x] Tests:
   - golden JSON for the remember body
   - label vector
   - `httptest` fake brainsrv:
@@ -491,6 +491,27 @@ reading and the label sanitizer, and is shared with B3.
     - Supersede → the replacement remember, then one supersede call, in
       order
   - `go test ./...` with no env set stays byte-identical to upstream behaviour
+
+**Phase 2 implementation notes** (as built on `brainsrv`):
+- Entity-id lookup for supersede: the `/v1/remember` response's `resolved.m`
+  is stored in `memory_sync.entity_id` (an extra column next to the planned
+  ones). On a cache miss the backend re-sends that memory's own remember:
+  brainsrv replays a recorded `Idempotency-Key` with the original result (and
+  creates the entity if it was never written), so the id is exact, needs no
+  name search, and the call is safe to repeat. `sync --all` ignores the cache.
+- `OpenConfigured` takes the same store path as `Open`, so each call site
+  change is exactly `Open` → `OpenConfigured`.
+- Supersede `valid_from` is the locally recorded supersede time (the old
+  memory's `UpdatedAt`), not the send time, so a retried supersede is the
+  identical request under the same `Idempotency-Key`.
+- A relayed `ProjectPath`/`ProjectID` the store does not know produces no
+  recall at all (empty result), mirroring upstream's "scopes to nothing".
+- `make check-labels` is the Go test `TestLabelVectorMatchesBrainsrv` (the
+  Makefile is upstream's and not in the edit table). It diffs against
+  `$BRAINSRV_LABELS_PATH`, else `../brainsrv/testdata/beacon/labels.json`,
+  and skips when neither exists.
+- Backend state for B2: `learning.BackendState(store)` returns `degraded`
+  and the `history` hits of the last search.
 
 ### Phase 3 — B2 MCP
 - [ ] `search_memory` / `get_memory_context`: backend results come through
