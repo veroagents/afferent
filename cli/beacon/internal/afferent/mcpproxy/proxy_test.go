@@ -411,11 +411,27 @@ func TestProxyReinitializesWhenTheTokenRotates(t *testing.T) {
 	if reinit == nil || !strings.Contains(string(reinit.Params), `"claude-code"`) || !strings.HasPrefix(reinit.ID, `"afferent-reinit-`) {
 		t.Fatalf("re-initialize with the client's params missing: %+v", reqs)
 	}
-	got := strings.Join(f.methods(), ",")
+	var posts []string
+	for _, r := range f.requests() {
+		if r.HTTPMethod == http.MethodPost {
+			posts = append(posts, r.Method)
+		}
+	}
+	got := strings.Join(posts, ",")
 	if !strings.HasSuffix(got, "initialize,notifications/initialized,tools/list") {
 		t.Fatalf("sequence %s", got)
 	}
 	s.close()
+	// The replaced session was ended with the token it was opened with.
+	var deleted []string
+	for _, r := range f.requests() {
+		if r.HTTPMethod == http.MethodDelete {
+			deleted = append(deleted, fmt.Sprintf("%s/%s=%d", r.SID, r.Token, r.Status))
+		}
+	}
+	if strings.Join(deleted, ",") != "sid-1/t1=200,sid-2/t2=200" {
+		t.Fatalf("DELETEs %v, want sid-1 (replaced) and sid-2 (at EOF)", deleted)
+	}
 }
 
 func TestProxyRecoversFromLostSessionAnd401(t *testing.T) {
@@ -550,7 +566,7 @@ func TestReadSSEStopsAtAnswer(t *testing.T) {
 	}()
 	done := make(chan struct{})
 	go func() {
-		msgs, err := readSSE(pr, []json.RawMessage{json.RawMessage("1")}, 1<<20)
+		msgs, err := readSSE(pr, []json.RawMessage{json.RawMessage("1")}, 1<<20, nil)
 		if err != nil || len(msgs) != 1 {
 			t.Errorf("readSSE %v %q", err, msgs)
 		}

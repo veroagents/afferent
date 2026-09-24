@@ -13,6 +13,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/auth"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/brain"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/config"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/forward"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/version"
 )
 
@@ -80,6 +81,10 @@ func (a *app) login(ctx context.Context, noBrowser bool, scope string) error {
 			fmt.Fprintf(a.env.Stderr, "warning: replaced a session for %s (client %s) without revoking it; it stays valid until it expires\n", old.Issuer, old.ClientID)
 		}
 	}
+	// A scope cached for the previous session may belong to another member.
+	if err := forward.ClearScopeCache(a.stateDir(r)); err != nil {
+		fmt.Fprintf(a.env.Stderr, "warning: could not clear the cached scope: %v\n", err)
+	}
 	// Remember the settings this login used, so later commands (and
 	// the forwarder) find these credentials without the same flags.
 	if err := config.Save(r.dir, r.cfg); err != nil {
@@ -134,6 +139,9 @@ func (a *app) logoutCmd() *cobra.Command {
 			}
 			if derr != nil && !errors.Is(derr, auth.ErrNotFound) {
 				return fmt.Errorf("delete credentials: %w", derr)
+			}
+			if err := forward.ClearScopeCache(a.stateDir(r)); err != nil {
+				fmt.Fprintf(a.env.Stderr, "warning: could not clear the cached scope: %v\n", err)
 			}
 			fmt.Fprintln(a.env.Stdout, "Signed out.")
 			return nil

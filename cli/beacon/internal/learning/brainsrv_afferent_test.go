@@ -214,3 +214,34 @@ func TestCachedMember(t *testing.T) {
 		t.Fatalf("opened %d times", n)
 	}
 }
+
+// A leftover BEACON_BRAINSRV_URL must not redirect the afferent token to
+// another brainsrv; restating afferent's own URL is fine.
+func TestAfferentBackendRefusesForeignEnvURL(t *testing.T) {
+	w := newAfferentWorld(t)
+	w.signIn("jwt-1")
+	w.use()
+	var foreign int
+	other := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		foreign++
+		http.Error(rw, "no", 500)
+	}))
+	defer other.Close()
+	db := filepath.Join(t.TempDir(), "memory.db")
+
+	t.Setenv(brainsrvcfg.EnvURL, other.URL)
+	if _, err := afferentBackend(db, os.Getenv); err == nil || !strings.Contains(err.Error(), "differs") {
+		t.Fatalf("got %v", err)
+	}
+	if HasBackend(OpenConfigured(db)) {
+		t.Fatal("a backend was built for a foreign BEACON_BRAINSRV_URL")
+	}
+	if foreign != 0 {
+		t.Fatalf("the foreign brainsrv got %d requests", foreign)
+	}
+
+	t.Setenv(brainsrvcfg.EnvURL, w.brain.URL+"/")
+	if b, err := afferentBackend(db, os.Getenv); err != nil || b.Config().URL != w.brain.URL {
+		t.Fatalf("same URL: %v", err)
+	}
+}

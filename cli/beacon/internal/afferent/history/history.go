@@ -43,6 +43,12 @@ type Options struct {
 	// backfilled later either (and a resumed one continues from its end).
 	Since time.Duration
 	Now   func() time.Time
+	// Room, when set, is how many more bytes the log can take before a
+	// rotation deletes data the forwarder has not sent (forward.Room). The
+	// Codex sweep stops there and reports RetentionLimited. Claude's
+	// collector has its own guard, which protects only its own output, so
+	// sync runs Claude first and Codex after it in each round.
+	Room func() (int64, error)
 }
 
 // Report is one harness's sweep.
@@ -113,11 +119,9 @@ func Sync(h string, o Options) (Report, error) {
 			}
 			rep.SkippedOld = n
 		}
-		s, err := codexsession.CollectOnce(codexsession.CollectOptions{
-			CodexDir: dir, StatePath: rep.StatePath, Write: true, LogPath: o.LogPath, UserMode: o.UserMode, Out: io.Discard,
-		})
-		rep.Sessions, rep.SessionsChanged, rep.Events, rep.Errors = s.Sessions, s.SessionsChanged, s.EventsEmitted, s.Errors
-		// The Codex collector has no retention guard of its own.
+		// Beacon's Codex collector has no retention guard: sweep with a
+		// room limit instead (codex.go).
+		err := codexSweep(dir, rep.StatePath, o.LogPath, o.UserMode, o.Room, &rep)
 		return rep, err
 	}
 	return rep, fmt.Errorf("unsupported harness %q (supported: claude, codex)", h)

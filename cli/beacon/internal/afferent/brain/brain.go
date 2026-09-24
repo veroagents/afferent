@@ -72,7 +72,7 @@ func (c *Client) Whoami(ctx context.Context) (*Whoami, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
-	resp, err := hc.Do(req)
+	resp, err := NoRedirects(hc).Do(req)
 	if err != nil {
 		return nil, err
 	}

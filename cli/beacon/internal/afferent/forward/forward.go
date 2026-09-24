@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/auth"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/brain"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/config"
 )
 
@@ -134,6 +135,8 @@ func New(opts Options) (*Forwarder, error) {
 	if opts.HTTP == nil {
 		opts.HTTP = &http.Client{Timeout: 2 * time.Minute}
 	}
+	// Never follow a redirect with the bearer token and the batch.
+	opts.HTTP = brain.NoRedirects(opts.HTTP)
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}

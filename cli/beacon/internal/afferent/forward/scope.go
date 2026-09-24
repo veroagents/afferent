@@ -52,11 +52,14 @@ func MemberScope(w *brain.Whoami) (string, error) {
 // scopeCache remembers the last scope brainsrv reported, so the forwarder can
 // start while brainsrv is unreachable.
 type scopeCache struct {
-	BrainsrvURL string    `json:"brainsrv_url"`
-	Context     string    `json:"context"`
-	Principal   string    `json:"principal,omitempty"`
-	Scope       string    `json:"scope"`
-	ResolvedAt  time.Time `json:"resolved_at"`
+	BrainsrvURL string `json:"brainsrv_url"`
+	Context     string `json:"context"`
+	Principal   string `json:"principal,omitempty"`
+	// Account is the signed-in identity the answer was for (see
+	// ScopeResolver.Account).
+	Account    string    `json:"account,omitempty"`
+	Scope      string    `json:"scope"`
+	ResolvedAt time.Time `json:"resolved_at"`
 }
 
 // ScopeResolver finds the X-Scope to send.
@@ -69,6 +72,34 @@ type ScopeResolver struct {
 	Context  string
 	Whoami   func(ctx context.Context) (*brain.Whoami, error)
 	Now      func() time.Time
+	// Account, when set, names the signed-in identity from the stored
+	// credentials (auth.Credentials.Account). A cached scope is only used
+	// for the account it was learned for, so signing in as another member
+	// never sends the previous member's scope.
+	Account func() string
+}
+
+func (r *ScopeResolver) account() string {
+	if r.Account == nil {
+		return ""
+	}
+	return r.Account()
+}
+
+// usable reports whether a cached answer is for this brainsrv, Context and
+// signed-in account.
+func (r *ScopeResolver) usable(c *scopeCache) bool {
+	return c != nil && c.BrainsrvURL == r.URL && c.Context == r.Context && c.Scope != "" && c.Account == r.account()
+}
+
+// ClearScopeCache forgets the cached member scope in stateDir (on login and
+// logout).
+func ClearScopeCache(stateDir string) error {
+	err := os.Remove(filepath.Join(stateDir, ScopeCacheFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // Resolve returns the scope and where it came from ("configured",
@@ -87,7 +118,7 @@ func (r *ScopeResolver) Resolve(ctx context.Context) (scope, source string, err 
 		if err != nil {
 			return "", "", err
 		}
-		r.save(scopeCache{BrainsrvURL: r.URL, Context: r.Context, Principal: w.PrincipalID, Scope: s})
+		r.save(scopeCache{BrainsrvURL: r.URL, Context: r.Context, Principal: w.PrincipalID, Account: r.account(), Scope: s})
 		return s, "brainsrv", nil
 	}
 	if ctx.Err() != nil {
@@ -98,7 +129,7 @@ func (r *ScopeResolver) Resolve(ctx context.Context) (scope, source string, err 
 	var se *brain.StatusError
 	transient := !errors.Is(err, brain.ErrWhoamiUnsupported) && (!errors.As(err, &se) || se.Status >= 500)
 	if transient {
-		if c := r.load(); c != nil && c.BrainsrvURL == r.URL && c.Context == r.Context && c.Scope != "" {
+		if c := r.load(); r.usable(c) {
 			return c.Scope, "cached", nil
 		}
 	}
@@ -140,7 +171,7 @@ func (r *ScopeResolver) save(c scopeCache) {
 
 // Cached returns the cached scope for display, or "".
 func (r *ScopeResolver) Cached() string {
-	if c := r.load(); c != nil && c.BrainsrvURL == r.URL && c.Context == r.Context {
+	if c := r.load(); r.usable(c) {
 		return c.Scope
 	}
 	return ""

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/auth"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/brain"
 )
 
 // Path is brainsrv's MCP endpoint.
@@ -103,6 +104,9 @@ type Proxy struct {
 	protocol     string // negotiated protocolVersion
 	gen          int    // bumped on every new session
 	reinits      int
+	// stale is a session invalidated after an error, ended with DELETE
+	// once a new one replaces it.
+	stale oldSession
 
 	wg sync.WaitGroup
 }
@@ -124,6 +128,8 @@ func New(opts Options) (*Proxy, error) {
 		// while. Requests end with the context.
 		opts.HTTP = &http.Client{}
 	}
+	// Never follow a redirect with the bearer token and message body.
+	opts.HTTP = brain.NoRedirects(opts.HTTP)
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
@@ -457,6 +463,9 @@ func (p *Proxy) rescope(ctx context.Context, old string) bool {
 func (p *Proxy) adoptSession(sid, tok, scope string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.sessionID != "" && p.sessionID != sid {
+		p.endOld(oldSession{sid: p.sessionID, tok: p.sessionTok, scope: p.sessionScope, pv: p.protocol})
+	}
 	p.sessionID, p.sessionTok, p.sessionScope = sid, tok, scope
 	p.gen++
 }
@@ -467,8 +476,34 @@ func (p *Proxy) invalidate(gen int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.gen == gen {
+		if p.sessionID != "" {
+			p.stale = oldSession{sid: p.sessionID, tok: p.sessionTok, scope: p.sessionScope, pv: p.protocol}
+		}
 		p.sessionID, p.sessionTok = "", ""
 	}
+}
+
+// oldSession is a session a new one replaced.
+type oldSession struct{ sid, tok, scope, pv string }
+
+// endOld sends DELETE for a replaced session in the background, best
+// effort, with the token it was opened with (brainsrv binds a session to
+// its token). Without it every token rotation would leave a dead binding
+// in brainsrv's bounded session table until its TTL, crowding out other
+// clients' idle sessions. A 401/404 (token expired, session gone) is fine.
+func (p *Proxy) endOld(o oldSession) {
+	if o.sid == "" || o.tok == "" {
+		return
+	}
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if resp, err := p.request(ctx, http.MethodDelete, o.tok, o.scope, o.sid, o.pv, nil); err == nil {
+			drain(resp)
+		}
+	}()
 }
 
 // ensureSession returns the session to send with a message, opening a new
@@ -491,6 +526,10 @@ func (p *Proxy) ensureSession(ctx context.Context, tok, scope string) (sid strin
 // sends notifications/initialized. Both answers are discarded: the client
 // already has its own. p.mu is held.
 func (p *Proxy) reinitLocked(ctx context.Context, tok, scope string) error {
+	old := p.stale
+	if p.sessionID != "" {
+		old = oldSession{sid: p.sessionID, tok: p.sessionTok, scope: p.sessionScope, pv: p.protocol}
+	}
 	p.reinits++
 	id := fmt.Sprintf("%q", fmt.Sprintf("afferent-reinit-%d", p.reinits))
 	init := []byte(`{"jsonrpc":"2.0","id":` + id + `,"method":"initialize","params":` + string(p.initParams) + `}`)
@@ -502,7 +541,7 @@ func (p *Proxy) reinitLocked(ctx context.Context, tok, scope string) error {
 		return &statusError{status: resp.StatusCode, body: readSnippet(resp)}
 	}
 	sid := resp.Header.Get(HeaderSession)
-	msgs, err := readMessages(resp, []json.RawMessage{json.RawMessage(id)}, p.opts.MaxMessage)
+	msgs, err := readMessages(resp, []json.RawMessage{json.RawMessage(id)}, p.opts.MaxMessage, nil)
 	if err != nil {
 		return err
 	}
@@ -517,6 +556,10 @@ func (p *Proxy) reinitLocked(ctx context.Context, tok, scope string) error {
 	}
 	p.sessionID, p.sessionTok, p.sessionScope = sid, tok, scope
 	p.gen++
+	if old.sid != sid {
+		p.endOld(old)
+	}
+	p.stale = oldSession{}
 	resp, err = p.post(ctx, tok, scope, sid, p.protocol, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
 	if err != nil {
 		return err
@@ -596,8 +639,10 @@ func (p *Proxy) readAnswer(resp *http.Response, ids []json.RawMessage, isInit bo
 		}
 		return answered, &statusError{status: resp.StatusCode, body: snippet(b)}
 	}
-	msgs, err := readMessages(resp, ids, p.opts.MaxMessage)
-	for _, m := range msgs {
+	// Each message goes to the client as it arrives: progress and log
+	// notifications stay live, and a request brainsrv sends on the stream
+	// reaches the client before the answer that may wait on its reply.
+	_, err := readMessages(resp, ids, p.opts.MaxMessage, func(m json.RawMessage) {
 		var r message
 		if json.Unmarshal(m, &r) == nil && r.isResponse() {
 			answered[idKey(r.ID)] = true
@@ -610,7 +655,7 @@ func (p *Proxy) readAnswer(resp *http.Response, ids []json.RawMessage, isInit bo
 			}
 		}
 		p.writeLine(m)
-	}
+	})
 	if err != nil {
 		return answered, err
 	}
@@ -634,8 +679,10 @@ func wanted(ids []json.RawMessage, id json.RawMessage) bool {
 
 // readMessages returns the JSON-RPC messages in a 2xx answer: a JSON body,
 // or the data of each SSE event. An SSE stream is read until every id in
-// ids is answered (brainsrv may keep it open), then closed.
-func readMessages(resp *http.Response, ids []json.RawMessage, max int) ([]json.RawMessage, error) {
+// ids is answered (brainsrv may keep it open), then closed. With emit set,
+// each message is handed to emit as soon as it is read instead of being
+// returned.
+func readMessages(resp *http.Response, ids []json.RawMessage, max int, emit func(json.RawMessage)) ([]json.RawMessage, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusNoContent {
 		drain(resp)
@@ -643,7 +690,7 @@ func readMessages(resp *http.Response, ids []json.RawMessage, max int) ([]json.R
 	}
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.HasPrefix(ct, "text/event-stream") {
-		return readSSE(resp.Body, ids, max)
+		return readSSE(resp.Body, ids, max, emit)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, int64(max)+1))
 	if err != nil {
@@ -658,7 +705,14 @@ func readMessages(resp *http.Response, ids []json.RawMessage, max int) ([]json.R
 	if !json.Valid(b) {
 		return nil, fmt.Errorf("brainsrv answered with invalid JSON (%s)", snippet(b))
 	}
-	return splitMessages(b), nil
+	msgs := splitMessages(b)
+	if emit != nil {
+		for _, m := range msgs {
+			emit(m)
+		}
+		return nil, nil
+	}
+	return msgs, nil
 }
 
 // splitMessages turns a JSON object or array into messages.
@@ -682,7 +736,7 @@ func splitMessages(b []byte) []json.RawMessage {
 
 // readSSE parses a text/event-stream (data lines joined by "\n" per event;
 // comments, id and retry fields ignored).
-func readSSE(r io.Reader, ids []json.RawMessage, max int) ([]json.RawMessage, error) {
+func readSSE(r io.Reader, ids []json.RawMessage, max int, emit func(json.RawMessage)) ([]json.RawMessage, error) {
 	pending := map[string]bool{}
 	for _, id := range ids {
 		pending[idKey(id)] = true
@@ -700,7 +754,11 @@ func readSSE(r io.Reader, ids []json.RawMessage, max int) ([]json.RawMessage, er
 			return
 		}
 		for _, m := range splitMessages(data) {
-			out = append(out, m)
+			if emit != nil {
+				emit(m)
+			} else {
+				out = append(out, m)
+			}
 			var r message
 			if json.Unmarshal(m, &r) == nil && r.isResponse() {
 				delete(pending, idKey(r.ID))

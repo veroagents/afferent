@@ -74,7 +74,9 @@ func syncHarnesses(v, home string) ([]string, error) {
 	case "all":
 		return append([]string(nil), history.All...), nil
 	}
-	var out []string
+	// Always Claude before Codex (history.Options.Room), whatever the order
+	// given.
+	want := map[string]bool{}
 	for _, part := range strings.Split(v, ",") {
 		h := strings.TrimSpace(part)
 		switch h {
@@ -86,7 +88,13 @@ func syncHarnesses(v, home string) ([]string, error) {
 		if h != history.Claude && h != history.Codex {
 			return nil, fmt.Errorf("sync supports claude and codex, not %q", part)
 		}
-		out = append(out, h)
+		want[h] = true
+	}
+	var out []string
+	for _, h := range history.All {
+		if want[h] {
+			out = append(out, h)
+		}
 	}
 	return out, nil
 }
@@ -125,7 +133,8 @@ func (a *app) runSync(ctx context.Context, o syncOptions, out io.Writer) error {
 		fmt.Fprintf(out, "The forwarder had not run yet; its checkpoints now start at the current end of %s.\n", logPath)
 	}
 
-	opts := history.Options{Home: home, LogPath: logPath, UserMode: !o.lf.system, Since: o.since, Now: a.env.Now}
+	opts := history.Options{Home: home, LogPath: logPath, UserMode: !o.lf.system, Since: o.since, Now: a.env.Now,
+		Room: func() (int64, error) { return forward.Room(stateDir, logPath) }}
 	totals := map[string]*history.Report{}
 	var errs []error
 	for round := 1; ; round++ {

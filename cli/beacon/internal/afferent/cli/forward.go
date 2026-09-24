@@ -60,6 +60,13 @@ func (a *app) scopeResolver(r *resolved, override string) (*forward.ScopeResolve
 		Context:  r.cfg.Context,
 		Whoami:   bc.Whoami,
 		Now:      a.env.Now,
+		Account: func() string {
+			c, err := r.store.Load()
+			if err != nil {
+				return ""
+			}
+			return c.Account()
+		},
 	}, bc
 }
 

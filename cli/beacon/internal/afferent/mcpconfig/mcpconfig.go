@@ -188,6 +188,11 @@ func Apply(ctx context.Context, h string, e Entry, o Options) (Result, error) {
 	return Result{}, fmt.Errorf("unsupported harness %q", h)
 }
 
+// keep lists the values afferent writes, which a diff may show.
+func (e Entry) keep() []string {
+	return append([]string{e.Command, "stdio", "mcpServers", "mcp_servers"}, e.Args...)
+}
+
 var jsonPath = []string{"mcpServers", ServerName}
 
 func claudeValue(e Entry) map[string]any {
@@ -287,7 +292,7 @@ func applyJSON(h, path string, e Entry, val any, o Options) (Result, error) {
 		return res, fmt.Errorf("%s: %w; not changed", path, err)
 	}
 	res.Action = action
-	res.Diff = unifiedDiff(path, before, after)
+	res.Diff = unifiedDiff(path, before, after, e.keep()...)
 	if o.DryRun || !res.Changed() {
 		return res, nil
 	}
@@ -305,7 +310,7 @@ func applyClaude(ctx context.Context, e Entry, o Options) (Result, error) {
 	if err != nil {
 		return Result{Harness: Claude, Path: path}, fmt.Errorf("%s: %w; not changed", path, err)
 	}
-	res := Result{Harness: Claude, Path: path, Via: "file", Action: action, Diff: unifiedDiff(path, before, after)}
+	res := Result{Harness: Claude, Path: path, Via: "file", Action: action, Diff: unifiedDiff(path, before, after, e.keep()...)}
 	cli, lookErr := o.lookPath("claude")
 	if lookErr == nil {
 		res.Via = "claude CLI"
@@ -457,7 +462,7 @@ func codexConflict(rest string) error {
 	table := ""
 	for i, l := range strings.Split(rest, "\n") {
 		if m := tomlHeader.FindStringSubmatch(l); m != nil && !strings.HasPrefix(strings.TrimSpace(l), "[[") {
-			table = strings.ReplaceAll(strings.ReplaceAll(m[1], " ", ""), `"`, "")
+			table = strings.NewReplacer(" ", "", "\t", "", `"`, "", "'", "").Replace(m[1])
 			if table == "mcp_servers."+ServerName || strings.HasPrefix(table, "mcp_servers."+ServerName+".") {
 				return fmt.Errorf("line %d already defines [%s]; remove or rename it, then run again", i+1, m[1])
 			}
@@ -514,7 +519,7 @@ func applyCodex(e Entry, o Options) (Result, error) {
 		}
 		after += want
 	}
-	res.Diff = unifiedDiff(path, before, []byte(after))
+	res.Diff = unifiedDiff(path, before, []byte(after), e.keep()...)
 	if o.DryRun || !res.Changed() {
 		return res, nil
 	}

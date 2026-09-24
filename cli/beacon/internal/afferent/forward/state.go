@@ -57,7 +57,23 @@ type State struct {
 	Initialized bool                   `json:"initialized"`
 	Files       map[string]*Checkpoint `json:"files"`
 	UpdatedAt   time.Time              `json:"updated_at"`
+	// OtherLogs keeps the checkpoints of other runtime logs this state
+	// directory has followed (the resolved log moves between user and
+	// system mode, or with --log-path). Switching back resumes from them
+	// instead of starting over at the end, which would skip what was
+	// appended in between.
+	OtherLogs map[string]*LogCheckpoints `json:"other_logs,omitempty"`
 }
+
+// LogCheckpoints is one other log's saved checkpoints.
+type LogCheckpoints struct {
+	Initialized bool                   `json:"initialized"`
+	Files       map[string]*Checkpoint `json:"files"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+}
+
+// maxOtherLogs bounds OtherLogs; the least recently used are dropped.
+const maxOtherLogs = 8
 
 func loadState(dir, logPath string) (*State, error) {
 	fresh := &State{Version: stateVersion, LogPath: logPath, Files: map[string]*Checkpoint{}}
@@ -72,8 +88,36 @@ func loadState(dir, logPath string) (*State, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("parse %s: %w (delete it to start over from the end of the log)", filepath.Join(dir, CheckpointsFile), err)
 	}
-	if s.Version != stateVersion || s.LogPath != logPath {
+	if s.Version != stateVersion {
 		return fresh, nil
+	}
+	if s.LogPath != logPath {
+		// Park the current log's checkpoints and take logPath's, if kept.
+		others := s.OtherLogs
+		if others == nil {
+			others = map[string]*LogCheckpoints{}
+		}
+		if s.LogPath != "" {
+			others[s.LogPath] = &LogCheckpoints{Initialized: s.Initialized, Files: s.Files, UpdatedAt: s.UpdatedAt}
+		}
+		next := fresh
+		if kept := others[logPath]; kept != nil {
+			next = &State{Version: stateVersion, LogPath: logPath, Initialized: kept.Initialized, Files: kept.Files, UpdatedAt: kept.UpdatedAt}
+			delete(others, logPath)
+		}
+		for len(others) > maxOtherLogs {
+			oldest := ""
+			for p, o := range others {
+				if oldest == "" || o.UpdatedAt.Before(others[oldest].UpdatedAt) {
+					oldest = p
+				}
+			}
+			delete(others, oldest)
+		}
+		if len(others) > 0 {
+			next.OtherLogs = others
+		}
+		s = *next
 	}
 	if s.Files == nil {
 		s.Files = map[string]*Checkpoint{}

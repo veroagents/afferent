@@ -149,9 +149,16 @@ func afferentBackend(path string, getenv func(string) string) (*BrainsrvBackend,
 		return nil, fmt.Errorf("afferent credentials: %w", err)
 	}
 	cfg := brainsrvcfg.Config{URL: sess.Config.BrainsrvURL}
+	// The member's authsrv token, Context and scope belong to afferent's
+	// brainsrv_url. A leftover BEACON_BRAINSRV_URL (from the key-file
+	// setup) may only restate it; a different host would receive the token.
 	if u := strings.TrimSpace(getenv(brainsrvcfg.EnvURL)); u != "" {
-		if cfg.URL, err = brainsrvcfg.ValidateURL(u); err != nil {
+		v, err := brainsrvcfg.ValidateURL(u)
+		if err != nil {
 			return nil, fmt.Errorf("%s: %w", brainsrvcfg.EnvURL, err)
+		}
+		if !strings.EqualFold(strings.TrimRight(v, "/"), strings.TrimRight(cfg.URL, "/")) {
+			return nil, fmt.Errorf("%s=%s differs from afferent's brainsrv_url %s; afferent credentials are only sent to afferent's brainsrv: unset %s (or change brainsrv_url with afferent)", brainsrvcfg.EnvURL, v, cfg.URL, brainsrvcfg.EnvURL)
 		}
 	}
 	if s := strings.TrimSpace(getenv(brainsrvcfg.EnvScope)); s != "" {

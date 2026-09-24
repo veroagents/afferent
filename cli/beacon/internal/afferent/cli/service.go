@@ -69,13 +69,17 @@ func (a *app) serviceSpec(r *resolved, lf logFlags, program string) (service.Spe
 	} else if lf.system {
 		args = append(args, "--system")
 	}
+	stateDir := a.stateDir(r)
+	if abs, err := filepath.Abs(stateDir); err == nil {
+		stateDir = abs // the service runs from / (launchd) or another cwd
+	}
 	spec := service.Spec{
 		Program: program,
 		Args:    args,
-		LogPath: filepath.Join(a.stateDir(r), forward.ServiceLogFile),
+		LogPath: filepath.Join(stateDir, forward.ServiceLogFile),
 	}
-	if d := a.env.Getenv(config.EnvStateDir); d != "" {
-		spec.Env = map[string]string{config.EnvStateDir: d}
+	if a.env.Getenv(config.EnvStateDir) != "" {
+		spec.Env = map[string]string{config.EnvStateDir: stateDir}
 	}
 	return spec, nil
 }

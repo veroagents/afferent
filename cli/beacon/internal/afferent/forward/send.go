@@ -142,6 +142,10 @@ func (fw *Forwarder) post(ctx context.Context, raw []byte) (*IngestResult, error
 		return nil, &sendError{kind: kindPause, reason: ReasonScopeDenied, status: status, msg: snippet(respBody)}
 	case status == http.StatusRequestEntityTooLarge:
 		return nil, &sendError{kind: kindTooLarge, status: status, msg: snippet(respBody)}
+	case status >= 300 && status < 400:
+		// Redirects are refused (brain.NoRedirects): the token and batch
+		// only go to the configured brainsrv_url.
+		return nil, &sendError{kind: kindClient, status: status, msg: "brainsrv answered with a redirect, which afferent does not follow; set brainsrv_url to the final address (" + snippet(respBody) + ")"}
 	case status >= 400 && status < 500:
 		return nil, &sendError{kind: kindClient, status: status, msg: snippet(respBody)}
 	default:
@@ -171,6 +175,9 @@ func (fw *Forwarder) do(ctx context.Context, token string, body []byte) (int, []
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil && resp.StatusCode == http.StatusOK {
 		return 0, nil, &sendError{kind: kindTransient, err: fmt.Errorf("read ingest response: %w", err)}
+	}
+	if resp.StatusCode/100 == 3 {
+		b = []byte("Location: " + resp.Header.Get("Location"))
 	}
 	return resp.StatusCode, b, nil
 }

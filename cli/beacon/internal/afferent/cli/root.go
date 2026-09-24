@@ -163,6 +163,11 @@ func (a *app) resolve() (*resolved, error) {
 			}
 		}
 	}
+	// Absolute, because the directory is written into the service unit and
+	// agents' MCP config, which run from another working directory.
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	cfg, err := config.Load(dir)
 	if err != nil {
 		return nil, err

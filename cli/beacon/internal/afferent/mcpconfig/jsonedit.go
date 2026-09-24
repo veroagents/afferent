@@ -238,9 +238,14 @@ func checked(b []byte) ([]byte, error) {
 	return b, nil
 }
 
-// unifiedDiff is a small line diff for --dry-run: the changed middle of the
-// file with three lines of context (edits here are always one region).
-func unifiedDiff(path string, before, after []byte) string {
+// unifiedDiff is a small line diff for --dry-run and setup: only the changed
+// lines of the file, with no surrounding context, and every string value in
+// them redacted unless it is one of keep (what afferent itself writes). The
+// file is another program's config: the lines next to the edit, and a
+// compact one-line file's single changed line, hold other servers' env
+// tokens and Authorization headers, and this diff goes to terminals, CI
+// logs and agent transcripts.
+func unifiedDiff(path string, before, after []byte, keep ...string) string {
 	if bytes.Equal(before, after) {
 		return ""
 	}
@@ -254,23 +259,68 @@ func unifiedDiff(path string, before, after []byte) string {
 	for s < len(a)-p && s < len(b)-p && a[len(a)-1-s] == b[len(b)-1-s] {
 		s++
 	}
-	const ctx = 3
-	lo := max(p-ctx, 0)
-	aHi, bHi := min(len(a)-s+ctx, len(a)), min(len(b)-s+ctx, len(b))
+	allowed := map[string]bool{ServerName: true}
+	for _, k := range keep {
+		allowed[k] = true
+	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "--- %s\n+++ %s (afferent)\n", path, path)
-	fmt.Fprintf(&out, "@@ -%d,%d +%d,%d @@\n", lo+1, aHi-lo, lo+1, bHi-lo)
-	for i := lo; i < p; i++ {
-		out.WriteString(" " + a[i] + "\n")
-	}
+	fmt.Fprintf(&out, "@@ -%d,%d +%d,%d @@\n", p+1, len(a)-s-p, p+1, len(b)-s-p)
 	for i := p; i < len(a)-s; i++ {
-		out.WriteString("-" + a[i] + "\n")
+		out.WriteString("-" + redactLine(a[i], allowed) + "\n")
 	}
 	for i := p; i < len(b)-s; i++ {
-		out.WriteString("+" + b[i] + "\n")
+		out.WriteString("+" + redactLine(b[i], allowed) + "\n")
 	}
-	for i := len(a) - s; i < aHi; i++ {
-		out.WriteString(" " + a[i] + "\n")
+	return out.String()
+}
+
+// redactValue replaces a string value shown in a diff.
+const redactValue = `"<redacted>"`
+
+// redactLine replaces each quoted string (JSON "…", TOML "…" or '…') in
+// line with redactValue, except keys (followed by ':' or '=') and the
+// allowed values.
+func redactLine(line string, allowed map[string]bool) string {
+	var out strings.Builder
+	for i := 0; i < len(line); {
+		q := line[i]
+		if q != '"' && q != '\'' {
+			out.WriteByte(q)
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(line) && line[j] != q {
+			if q == '"' && line[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j >= len(line) {
+			// Unterminated: redact the rest.
+			out.WriteString(redactValue)
+			break
+		}
+		lit := line[i : j+1]
+		k := j + 1
+		for k < len(line) && (line[k] == ' ' || line[k] == '\t') {
+			k++
+		}
+		isKey := k < len(line) && (line[k] == ':' || line[k] == '=')
+		val := lit[1 : len(lit)-1]
+		if q == '"' {
+			var u string
+			if json.Unmarshal([]byte(lit), &u) == nil {
+				val = u
+			}
+		}
+		if isKey || allowed[val] {
+			out.WriteString(lit)
+		} else {
+			out.WriteString(redactValue)
+		}
+		i = j + 1
 	}
 	return out.String()
 }

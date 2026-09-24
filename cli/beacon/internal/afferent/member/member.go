@@ -81,12 +81,14 @@ func Open(opts Options) (*Session, error) {
 	} else {
 		store = auth.DefaultStore(dir, cfg.Issuer, cfg.ClientID, func(error) {})
 	}
-	if _, err := store.Load(); err != nil {
+	creds, err := store.Load()
+	if err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			return nil, ErrNotSignedIn
 		}
 		return nil, fmt.Errorf("read afferent credentials: %w", err)
 	}
+	account := creds.Account()
 	client := auth.NewClient(cfg)
 	client.HTTP = opts.HTTP
 	ts := &auth.TokenSource{Store: store, LockPath: auth.LockFile(dir), Client: client, Now: opts.Now}
@@ -103,6 +105,7 @@ func Open(opts Options) (*Session, error) {
 			Context:  cfg.Context,
 			Whoami:   bc.Whoami,
 			Now:      opts.Now,
+			Account:  func() string { return account },
 		},
 	}, nil
 }
