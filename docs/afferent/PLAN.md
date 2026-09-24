@@ -290,6 +290,35 @@ The user is still signed out, so nothing has run against vero-local yet.
   5. `afferent sync --since 168h`, then `afferent forward --once`.
   6. `beacon memory brainsrv status`, which should show `auth afferent`.
 
+**Live test 3, 2026-09-24: D6 and D7 (vero-local, real login, nothing installed).**
+- ✅ `afferent status` shows signed in, the member scope derived from claims,
+  the service not installed, and the forwarder not yet run.
+- ✅ `afferent forward --once --backfill` on a fresh 7,959-event log of this
+  project's Claude sessions:
+  - 5 batches, 0 rejected, about 11 s;
+  - brainsrv accepted 5,960 and reported 1,999 duplicates (the history
+    already sent under this principal);
+  - a second run sent nothing, because the checkpoints held.
+- ✅ `afferent mcp proxy`: `initialize` answers with serverInfo
+  `brainsrv`. `tools/list` returns context, forget, inspect, recall,
+  reflect, remember and upload. `recall` returns results including
+  vector hits (`f_vector`) and facts extracted from captured turns.
+- ✅ Token expiry mid-session: with the stored token forced expired between
+  two `recall` calls in one proxy process, the proxy refreshed (the refresh
+  token rotated), logged "opened a new brainsrv MCP session", and answered
+  call 2 normally. The client saw no error.
+- ✅ `afferent setup --dry-run` against the real HOME:
+  - planned Beacon hooks for Claude Code and Codex;
+  - the launchd `com.veroagents.afferent.forwarder`;
+  - `claude mcp add --scope user brain -- afferent mcp proxy`;
+  - a marked `[mcp_servers.brain]` block in `~/.codex/config.toml`;
+  - a history backfill.
+  
+  The checksums of `~/.claude.json`, `~/.cursor/mcp.json`,
+  `~/.codex/config.toml` and `~/.claude/settings.json` were unchanged.
+- Cosmetic: in dry-run, the "brainsrv scope" section body is empty; the scope
+  appears only in the summary.
+
 **Test plan:** each step is tested live on vero-local with a real browser
 approval. The first test is D1 + D5: device login as `drew@vero.localhost`,
 decode the claims, and call brainsrv with the JWT.
