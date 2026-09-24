@@ -24,13 +24,13 @@ type Forwarder = asymptote.Forwarder
 // NewForwarderManager returns the service manager for the brainsrv forwarder: the upstream
 // ForwarderManager with this forwarder's own launchd label, systemd unit and description, so
 // it never touches the Beacon Managed forwarder's service.
-func NewForwarderManager(userMode bool) service.ForwarderManager {
-	return service.ForwarderManager{
+func NewForwarderManager(userMode bool) ForwarderManager {
+	return ForwarderManager{service.ForwarderManager{
 		UserMode:     userMode,
 		LaunchdLabel: LaunchdLabel,
 		SystemdUnit:  SystemdUnit,
 		Description:  ServiceDescription,
-	}
+	}}
 }
 
 // ConnectOptions drives Connect.
@@ -51,6 +51,9 @@ type ConnectOptions struct {
 	VectorBin string
 	// Forwarder overrides the service manager; nil uses NewForwarderManager.
 	Forwarder Forwarder
+	// StopTimeout bounds the wait for a running forwarder to exit before its checkpoints or
+	// buffer are cleared; zero uses DefaultStopTimeout.
+	StopTimeout time.Duration
 	// HTTPClient is used for the grant check; nil uses a default with HealthTimeout.
 	HTTPClient *http.Client
 	Out        io.Writer
@@ -76,8 +79,10 @@ type ConnectResult struct {
 // validation, the key file's ownership and mode, the brainsrv grant check for read and write on
 // the scope, locating Vector, and a preflight validate of the template in a scratch dir). Only
 // then is the key written (0600, atomically), the real config rendered and validated from a
-// temp file, and only then written and pointed at by the service unit. The connection record is
-// saved last, so status never claims a connection that did not finish.
+// temp file, and only then written and pointed at by the service unit. The running forwarder
+// is stopped (and waited for) only when its checkpoints or buffer must be cleared, after the
+// new config and unit are in place. The connection record is saved last, so status never
+// claims a connection that did not finish; any failure before that restores what was there.
 func Connect(ctx context.Context, opts ConnectOptions) (_ *ConnectResult, err error) {
 	out := opts.Out
 	if out == nil {
@@ -145,8 +150,21 @@ func Connect(ctx context.Context, opts ConnectOptions) (_ *ConnectResult, err er
 		return nil, err
 	}
 
+	// From here on every change is undone if a later step fails: a first connect leaves
+	// nothing installed, a reconnect puts back the previous key, config, checkpoints and
+	// buffer and restarts the previous forwarder.
+	tx := newConnectTx(opts.UserMode, manager, reconnect)
+	defer func() {
+		if err != nil {
+			err = tx.rollback(err)
+		}
+	}()
+
 	// Secrets first, then the config that references them, then the unit that runs it.
-	if err := WriteSecrets(opts.UserMode, key); err != nil {
+	if err := checkStorableKey(key); err != nil {
+		return nil, err
+	}
+	if err := tx.writeFile(SecretsPath(opts.UserMode), []byte(SecretsFileContent(key)), 0o600); err != nil {
 		return nil, fmt.Errorf("could not store the brainsrv key: %w", err)
 	}
 	dataDir := DataDir(opts.UserMode)
@@ -163,37 +181,50 @@ func Connect(ctx context.Context, opts ConnectOptions) (_ *ConnectResult, err er
 	if err := preValidateVectorConfig(vector.Path, configPath, []byte(rendered)); err != nil {
 		return nil, err
 	}
-
-	forwarderTouched := false
-	defer func() {
-		// A first connect that fails after touching the service manager leaves nothing
-		// running; a reconnect leaves the previous forwarder for the operator to retry.
-		if err == nil || reconnect || !forwarderTouched {
-			return
-		}
-		if unloadErr := manager.Unload(); unloadErr != nil {
-			err = errors.Join(err, fmt.Errorf("could not stop the incomplete forwarder: %w", unloadErr))
-		}
-		manager.RemoveUnits()
-	}()
-	if opts.Backfill {
-		// read_from only applies to a file with no checkpoint, so a backfill must drop this
-		// forwarder's checkpoints; stop Vector first so it cannot write them back. The disk
-		// buffer is left alone: lines already buffered are still delivered.
-		forwarderTouched = true
-		_ = manager.Unload()
-		if err := os.RemoveAll(CheckpointDir(opts.UserMode)); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("could not clear checkpoints for --backfill: %w", err)
-		}
-	}
-	if err := writeFileAtomic(configPath, []byte(rendered), 0o644); err != nil {
+	// Vector runs without --watch-config, so rewriting the config and unit does not disturb a
+	// running forwarder; nothing is stopped until both are in place.
+	if err := tx.writeFile(configPath, []byte(rendered), 0o644); err != nil {
 		return nil, err
 	}
-	forwarderTouched = true
+	tx.forwarderTouched = true
 	unitPath, err := manager.WriteUnit(vector.Path, configPath)
 	if err != nil {
 		return nil, err
 	}
+
+	// The disk buffer and checkpoints belong to one (url, scope). Lines buffered for another
+	// brainsrv or scope must never be posted here with this key, so a changed or unknown
+	// destination starts from an empty data dir.
+	destination := Destination{URL: base, Scope: opts.Scope}
+	resetData := dataDirDestinationMismatch(opts.UserMode, destination)
+	if resetData || opts.Backfill {
+		// Vector must be fully gone first: launchd's bootout returns while it is still draining
+		// and it would write its checkpoints back on exit.
+		tx.stopped = true
+		if err := stopForwarder(manager, opts.StopTimeout); err != nil {
+			return nil, err
+		}
+		if resetData {
+			if err := tx.moveAside(dataDir); err != nil {
+				return nil, fmt.Errorf("could not clear the data dir of the previous brainsrv destination: %w", err)
+			}
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				return nil, err
+			}
+			fmt.Fprintln(out, "Cleared the Vector data dir: its checkpoints and buffer belonged to a different brainsrv URL or scope")
+		} else {
+			// read_from only applies to a file with no checkpoint, so a backfill drops this
+			// forwarder's checkpoints. The disk buffer is left alone: lines already buffered
+			// for this destination are still delivered.
+			if err := tx.moveAside(CheckpointDir(opts.UserMode)); err != nil {
+				return nil, fmt.Errorf("could not clear checkpoints for --backfill: %w", err)
+			}
+		}
+	}
+	if err := tx.writeFile(DestinationPath(opts.UserMode), destination.encode(), 0o600); err != nil {
+		return nil, err
+	}
+	tx.loaded = true
 	if err := manager.Load(); err != nil {
 		return nil, fmt.Errorf("forwarder installed at %s but could not be started: %w", unitPath, err)
 	}
@@ -208,9 +239,10 @@ func Connect(ctx context.Context, opts ConnectOptions) (_ *ConnectResult, err er
 		VectorBin:     vector.Path,
 		VectorVersion: vector.Version,
 	}
-	if err := SaveConnection(opts.UserMode, connection); err != nil {
+	if err := tx.saveConnection(connection); err != nil {
 		return nil, err
 	}
+	tx.commit()
 	return &ConnectResult{
 		Connection:     connection,
 		VectorConfig:   configPath,
@@ -230,6 +262,9 @@ type DisconnectOptions struct {
 	Forwarder Forwarder
 	// Purge also removes the Vector data dir (checkpoints and undelivered disk buffer).
 	Purge bool
+	// KeepState stops and removes the service but leaves the key, config and connection
+	// record (endpoint uninstall --keep-config).
+	KeepState bool
 }
 
 // Disconnect stops and removes the forwarder's service and deletes the connection record,
@@ -248,6 +283,9 @@ func Disconnect(opts DisconnectOptions) error {
 			problems = append(problems, fmt.Errorf("stop forwarder: %w", err))
 		}
 		manager.RemoveUnits()
+	}
+	if opts.KeepState {
+		return errors.Join(problems...)
 	}
 	if err := RemoveState(opts.UserMode, opts.Purge); err != nil {
 		problems = append(problems, fmt.Errorf("remove %s: %w", Dir(opts.UserMode), err))

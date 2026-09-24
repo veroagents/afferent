@@ -23,6 +23,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/brainsrvcfg"
 	endpointconfig "github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/config"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/siempack"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/writer"
 )
 
 //go:embed pack/*
@@ -74,6 +75,9 @@ var DefaultLogPath = endpointconfig.SystemLogPath()
 const (
 	vectorAsset            = "pack/vector.toml.tmpl"
 	privacyTransformMarker = "# BEACON_PRIVACY_TRANSFORMS"
+	logPathToken           = "{{LOG_PATH}}"
+	// globMetacharacters are special in a Vector file source's include pattern.
+	globMetacharacters = "*?["
 )
 
 // File is the installable pack-file type, shared with siempack.
@@ -130,15 +134,34 @@ func RenderVectorConfig(opts RenderOptions) (string, error) {
 	if opts.SecretsFile == "" || opts.DataDir == "" {
 		return "", ErrIncompleteRender
 	}
-	content, err := VectorConfig(opts.LogPath)
+	logPath := opts.LogPath
+	if logPath == "" {
+		logPath = DefaultLogPath
+	}
+	if strings.ContainsAny(logPath, globMetacharacters) {
+		return "", ErrGlobLogPath
+	}
+	// The raw template, not VectorConfig: {{LOG_PATH}} must go through tomlString like every
+	// other literal, or a quote in the path would end the TOML string.
+	content, err := pack.Read(vectorAsset)
 	if err != nil {
 		return "", err
 	}
 	readFrom := ReadFromEnd
+	include := []string{logPath}
 	if opts.Backfill {
 		readFrom = ReadFromBeginning
+		// The writer's retained archives (runtime.jsonl.1 ... .N) hold the older history. Vector
+		// fingerprints by content, so a file that rotates into an archive is not read twice, and
+		// brainsrv deduplicates on event.id anyway.
+		include = writer.RetainedLogPaths(logPath)
+	}
+	quoted := make([]string, len(include))
+	for i, path := range include {
+		quoted[i] = tomlString(path)
 	}
 	replacements := []struct{ from, to string }{
+		{`["` + logPathToken + `"]`, "[" + strings.Join(quoted, ", ") + "]"},
 		{`"${` + EnvDataDir + `:-` + DefaultTemplateDataDir + `}"`, tomlString(opts.DataDir)},
 		{`"${` + EnvSecretsFile + `}"`, tomlString(opts.SecretsFile)},
 		{`"${` + EnvReadFrom + `:-end}"`, tomlString(readFrom)},
@@ -150,7 +173,7 @@ func RenderVectorConfig(opts RenderOptions) (string, error) {
 		content = strings.ReplaceAll(content, r.from, r.to)
 	}
 	content = strings.Replace(content, privacyTransformMarker, "# No privacy transforms: lines are forwarded byte-for-byte", 1)
-	if strings.Contains(content, privacyTransformMarker) || strings.Contains(content, "${") {
+	if strings.Contains(content, privacyTransformMarker) || hasUnescapedReference(content) {
 		return "", ErrIncompleteRender
 	}
 	return content, nil
@@ -166,9 +189,30 @@ func HealthURL(base, scope string) string {
 	return u
 }
 
-// tomlString quotes s as a TOML basic string.
+// hasUnescapedReference reports a ${ that Vector would interpolate: one preceded by an even
+// number of $ (tomlString writes a literal $ as $$).
+func hasUnescapedReference(content string) bool {
+	for i := strings.Index(content, "${"); i >= 0; {
+		run := 0
+		for j := i - 1; j >= 0 && content[j] == '$'; j-- {
+			run++
+		}
+		if run%2 == 0 {
+			return true
+		}
+		next := strings.Index(content[i+2:], "${")
+		if next < 0 {
+			return false
+		}
+		i += 2 + next
+	}
+	return false
+}
+
+// tomlString quotes s as a TOML basic string. Vector interpolates $VAR and ${VAR} across the
+// whole config text before parsing it, so a literal $ is written as $$.
 func tomlString(s string) string {
-	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`)
+	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`, "$", "$$")
 	return `"` + replacer.Replace(s) + `"`
 }
 
@@ -189,4 +233,5 @@ const (
 	ErrInsecureURL      renderError = "brainsrv URL must use https:// (plain http is allowed only for a loopback development server)"
 	ErrInvalidScope     renderError = "brainsrv scope must match ^[a-z0-9_]+(\\.[a-z0-9_]+)*$"
 	ErrIncompleteRender renderError = "brainsrv forwarder render needs URL, scope, secrets file and data dir"
+	ErrGlobLogPath      renderError = "brainsrv forwarder log path must not contain *, ? or [ (Vector would treat it as a glob)"
 )

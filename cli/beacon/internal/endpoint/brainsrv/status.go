@@ -41,8 +41,22 @@ type ForwarderStatus struct {
 	Endpoints     []Endpoint `json:"endpoints,omitempty"`
 	// LastSeen is brainsrv's last_seen for this machine's hostname, when listed.
 	LastSeen *time.Time `json:"last_seen,omitempty"`
-	Message  string     `json:"message,omitempty"`
+	// Write is the result of an empty write probe on the scope ("ok", "unauthorized",
+	// "forbidden", "unknown", or "" when skipped): the read health route alone cannot show a
+	// key that lost its write grant, and Vector drops every batch brainsrv answers with a 4xx.
+	Write        string `json:"write,omitempty"`
+	WriteMessage string `json:"write_message,omitempty"`
+	// VectorLog is where Vector records dropped batches: a file for launchd, a journalctl
+	// command for systemd.
+	VectorLog string `json:"vector_log,omitempty"`
+	// Warnings flag telemetry that is probably not arriving.
+	Warnings []string `json:"warnings,omitempty"`
+	Message  string   `json:"message,omitempty"`
 }
+
+// DeliveryGrace is how long after a line is written brainsrv is expected to have it: the
+// sink's 60 s batch timeout plus a 30 s request and retries.
+const DeliveryGrace = 3 * time.Minute
 
 // StatusOptions tunes Status; zero values are the production defaults.
 type StatusOptions struct {
@@ -53,6 +67,8 @@ type StatusOptions struct {
 	Forwarder Forwarder
 	// Hostname picks this machine's row out of the endpoint list; empty uses os.Hostname.
 	Hostname string
+	// Now is injectable for tests.
+	Now func() time.Time
 }
 
 // Status describes the brainsrv forwarder on this endpoint. The stored key is used for one
@@ -81,6 +97,11 @@ func Status(ctx context.Context, userMode bool, opts StatusOptions) ForwarderSta
 		Forwarder:    manager.Status(),
 		DataDirBytes: dirSize(DataDir(userMode)),
 	}
+	kind := service.Kind(status.Forwarder.Kind)
+	if fm, ok := manager.(ForwarderManager); ok && kind == "" {
+		kind = fm.kind()
+	}
+	status.VectorLog = VectorLogHint(userMode, kind)
 	status.Checkpoints, err = ReadCheckpoints(userMode)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -96,16 +117,10 @@ func Status(ctx context.Context, userMode bool, opts StatusOptions) ForwarderSta
 		status.Health, status.HealthMessage = "unknown", err.Error()
 		return status
 	}
-	health, err := Client{BaseURL: connection.URL, Key: key, HTTP: opts.HTTPClient}.Health(ctx, connection.Scope)
-	switch {
-	case errors.Is(err, ErrUnauthorized):
-		status.Health, status.HealthMessage = "unauthorized", err.Error()
-	case errors.Is(err, ErrForbidden):
-		status.Health, status.HealthMessage = "forbidden", err.Error()
-	case err != nil:
-		status.Health, status.HealthMessage = "unknown", err.Error()
-	default:
-		status.Health = "ok"
+	client := Client{BaseURL: connection.URL, Key: key, HTTP: opts.HTTPClient}
+	health, err := client.Health(ctx, connection.Scope)
+	status.Health, status.HealthMessage = classifyStatus(err)
+	if err == nil {
 		status.Endpoints = health.Endpoints
 		hostname := opts.Hostname
 		if hostname == "" {
@@ -119,7 +134,55 @@ func Status(ctx context.Context, userMode bool, opts StatusOptions) ForwarderSta
 			}
 		}
 	}
+	status.Write, status.WriteMessage = classifyStatus(client.ProbeWrite(ctx, connection.Scope))
+	if status.Write != "ok" && status.Write != "unknown" {
+		status.Warnings = append(status.Warnings, fmt.Sprintf("brainsrv refuses writes on %s (%s): Vector drops every batch it rejects with a 4xx, see %s", connection.Scope, status.WriteMessage, status.VectorLog))
+	}
+	now := time.Now
+	if opts.Now != nil {
+		now = opts.Now
+	}
+	if warning := undeliveredWarning(connection, status.LastSeen, now(), status.VectorLog); status.Health == "ok" && warning != "" {
+		status.Warnings = append(status.Warnings, warning)
+	}
 	return status
+}
+
+func classifyStatus(err error) (string, string) {
+	switch {
+	case err == nil:
+		return "ok", ""
+	case errors.Is(err, ErrUnauthorized):
+		return "unauthorized", err.Error()
+	case errors.Is(err, ErrForbidden):
+		return "forbidden", err.Error()
+	default:
+		return "unknown", err.Error()
+	}
+}
+
+// undeliveredWarning flags a runtime log written well after brainsrv last heard from this
+// host, once that write is old enough that the batch should have arrived. Vector's checkpoint
+// tracks reading, not delivery, so a batch brainsrv rejected (403 on a derived scope, 413,
+// 400) leaves no other trace here.
+func undeliveredWarning(connection *Connection, lastSeen *time.Time, now time.Time, vectorLog string) string {
+	info, err := os.Stat(connection.LogPath)
+	if err != nil {
+		return ""
+	}
+	written := info.ModTime()
+	reference := connection.ConnectedAt
+	if lastSeen != nil && lastSeen.After(reference) {
+		reference = *lastSeen
+	}
+	if written.Sub(reference) <= DeliveryGrace || now.Sub(written) <= DeliveryGrace {
+		return ""
+	}
+	seen := "never"
+	if lastSeen != nil {
+		seen = lastSeen.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("the runtime log was written at %s but brainsrv last heard from this host %s: batches may have been rejected and dropped; see %s, then reconnect with --backfill to re-send", written.UTC().Format(time.RFC3339), seen, vectorLog)
 }
 
 // ReadCheckpoints parses Vector's file-source checkpoint file for the runtime source

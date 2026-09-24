@@ -58,7 +58,37 @@ vector --config ./afferent-brainsrv-pack/vector.toml
 ## Backfill
 
 `read_from` only applies to a file with no checkpoint in the data_dir.
-`connect --backfill` renders `read_from = "beginning"` and clears this
-forwarder's file checkpoints, so the whole existing log is re-read once. A later
-`connect` without `--backfill` renders `read_from = "end"` again and keeps the
-checkpoints, so it resumes where it left off.
+`connect --backfill` renders `read_from = "beginning"`, adds the writer's
+retained archives (`runtime.jsonl.1` … `.5`) to the source, and clears this
+forwarder's file checkpoints, so the whole retained history is re-read once.
+It first stops the running forwarder and waits for Vector to exit, so the old
+process cannot write its checkpoints back. A later `connect` without
+`--backfill` renders `read_from = "end"` again and keeps the checkpoints, so it
+resumes where it left off.
+
+## Changing URL or scope
+
+The disk buffer and checkpoints belong to one brainsrv URL and scope
+(recorded in `data-destination.json`). A `connect` to a different URL or scope,
+or onto a data dir whose destination is unknown, empties the data dir first,
+so lines buffered for one workspace are never posted to another with a
+different key. A failed `connect` puts back the previous key, config,
+checkpoints and buffer and restarts the previous forwarder.
+
+## Rejected batches
+
+Vector retries 5xx but drops a batch brainsrv answers with a 4xx (a derived
+scope the key cannot write, an oversized request). Its checkpoint keeps
+advancing, because it tracks reading, not delivery. `status` therefore also
+runs the empty write probe and warns when the log was written well after
+brainsrv last heard from this host. Vector's own log records every drop: on
+macOS `<state dir>/vector.log` (inside the 0700 state directory, not `/tmp`),
+on Linux `journalctl [--user] -u afferent-brainsrv-forwarder.service`. Fix the
+cause, then `connect --backfill` to re-send.
+
+## Uninstall
+
+`beacon endpoint uninstall` also stops and removes this forwarder, its stored
+key, config and data dir (`--keep-config` removes only the service).
+`beacon endpoint brainsrv disconnect` does the same on its own. Neither
+revokes the key in brainsrv.

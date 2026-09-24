@@ -609,6 +609,18 @@ enrollment, account, reconnect or privacy transforms. Keep the
     render and the hand-run template, and a live run sends gzip NDJSON with
     `X-Scope`, bearer key and `HEAD …/health?scope=…`; checkpoints land in
     `<data_dir>/beacon_runtime/checkpoints.json`.
+  - Review fixes: `--backfill` also includes the retained archives
+    (`writer.RetainedLogPaths`) and waits for the stopped forwarder to be gone
+    before clearing checkpoints; a changed or unknown (url, scope) empties the
+    data dir (`data-destination.json`); a failed connect restores the previous
+    key, config, checkpoints and buffer and restarts the previous forwarder;
+    literals escape `$` as `$$` and the log path is TOML-quoted; `status` runs
+    the write probe and flags undelivered log writes; the launchd job logs to
+    `<state dir>/vector.log` via a brainsrv-owned plist writer (no further
+    `forwarder.go` edit); `beacon endpoint uninstall` tears the brainsrv
+    forwarder down through a RunE wrapper in the new
+    `cmd/endpoint_brainsrv_uninstall.go` (no edit to upstream cmd files or
+    `lifecycle.go`).
 
 ### Packaging
 - [ ] `cli/beacon/.goreleaser.afferent.yaml` (new):

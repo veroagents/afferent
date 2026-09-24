@@ -64,10 +64,18 @@ the Vector config, and installs com.afferent.brainsrv-forwarder (launchd) or
 afferent-brainsrv-forwarder.service (systemd).
 
 By default only activity recorded after the forwarder first starts is sent.
---backfill sends the existing log too: it renders read_from = "beginning" and
-clears this forwarder's checkpoints. A later connect without --backfill renders
+--backfill sends the existing log too, including the retained rotated archives
+(runtime.jsonl.1 ... .5): it renders read_from = "beginning", stops the running
+forwarder and waits for it to exit, then clears this forwarder's checkpoints. A later connect without --backfill renders
 read_from = "end" again and keeps the checkpoints, so it resumes where it was.
-Re-sent lines are safe: brainsrv deduplicates on event.id.`,
+Re-sent lines are safe: brainsrv deduplicates on event.id.
+
+Connecting to a different --url or --scope empties Vector's data dir, so lines
+buffered for the previous destination are never sent to this one. A failed
+connect restores the previous connection and restarts its forwarder.
+
+beacon endpoint uninstall also removes this forwarder; run
+beacon endpoint brainsrv disconnect to remove it on its own.`,
 	SilenceUsage: true,
 	RunE:         runEndpointBrainsrvConnect,
 }
@@ -131,7 +139,7 @@ func init() {
 	f.StringVar(&brainsrvOpts.url, "url", "", "brainsrv base URL (https; http only for localhost)")
 	f.StringVar(&brainsrvOpts.scope, "scope", "", "Your base scope, e.g. ws.<ws_id>.people.<member>.harness")
 	f.StringVar(&brainsrvOpts.keyFile, "key-file", "", "0600 file holding your own spk_ key")
-	f.BoolVar(&brainsrvOpts.backfill, "backfill", false, "Also send the existing runtime log (read_from = beginning; clears this forwarder's checkpoints)")
+	f.BoolVar(&brainsrvOpts.backfill, "backfill", false, "Also send the existing runtime log and its retained archives (read_from = beginning; clears this forwarder's checkpoints)")
 	for _, c := range []*cobra.Command{endpointBrainsrvConnectCmd, endpointBrainsrvValidateCmd} {
 		c.Flags().StringVar(&brainsrvOpts.vectorBin, "vector-bin", "", "Vector binary to run (defaults to "+asymptote.VectorBinEnv+", "+asymptote.PackagedVectorPath+", Homebrew, then PATH)")
 	}
@@ -247,6 +255,15 @@ func runEndpointBrainsrvStatus(cmd *cobra.Command, _ []string) error {
 		}
 	default:
 		fmt.Fprintf(out, "brainsrv health: %s (%s)\n", status.Health, status.HealthMessage)
+	}
+	if status.Write != "" && status.Write != "ok" {
+		fmt.Fprintf(out, "brainsrv write: %s (%s)\n", status.Write, status.WriteMessage)
+	}
+	for _, warning := range status.Warnings {
+		fmt.Fprintf(out, "Warning: %s\n", warning)
+	}
+	if status.VectorLog != "" {
+		fmt.Fprintf(out, "Vector log (rejected batches are recorded here): %s\n", status.VectorLog)
 	}
 	return nil
 }

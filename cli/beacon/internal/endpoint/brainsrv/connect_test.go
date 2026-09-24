@@ -22,9 +22,17 @@ import (
 const testKey = "spk_member_key_0123456789"
 
 type fakeForwarder struct {
-	unitPath string
-	calls    []string
-	loadErr  error
+	unitPath  string
+	calls     []string
+	loadErr   error
+	unloadErr error
+	// loaded is what Status reports. drainPolls keeps it loaded for that many Status calls
+	// after Unload (launchd's bootout returns while Vector drains); onDrain runs on each of
+	// them, standing in for the exiting Vector. stuck never lets it stop.
+	loaded     bool
+	drainPolls int
+	onDrain    func()
+	stuck      bool
 }
 
 func (f *fakeForwarder) Supported() bool           { return true }
@@ -40,8 +48,23 @@ func (f *fakeForwarder) WriteUnit(vectorBin, configPath string) (string, error) 
 	}
 	return f.unitPath, nil
 }
-func (f *fakeForwarder) Load() error   { f.calls = append(f.calls, "load"); return f.loadErr }
-func (f *fakeForwarder) Unload() error { f.calls = append(f.calls, "unload"); return nil }
+func (f *fakeForwarder) Load() error {
+	f.calls = append(f.calls, "load")
+	if f.loadErr == nil {
+		f.loaded = true
+	}
+	return f.loadErr
+}
+func (f *fakeForwarder) Unload() error {
+	f.calls = append(f.calls, "unload")
+	if f.unloadErr != nil {
+		return f.unloadErr
+	}
+	if f.drainPolls == 0 && !f.stuck {
+		f.loaded = false
+	}
+	return nil
+}
 func (f *fakeForwarder) RemoveUnits() {
 	f.calls = append(f.calls, "remove")
 	if f.unitPath != "" {
@@ -49,7 +72,16 @@ func (f *fakeForwarder) RemoveUnits() {
 	}
 }
 func (f *fakeForwarder) Status() service.Status {
-	return service.Status{Label: LaunchdLabel, Loaded: true, Running: true}
+	if f.loaded && !f.stuck && f.drainPolls > 0 && len(f.calls) > 0 && f.calls[len(f.calls)-1] == "unload" {
+		f.drainPolls--
+		if f.onDrain != nil {
+			f.onDrain()
+		}
+		if f.drainPolls == 0 {
+			f.loaded = false
+		}
+	}
+	return service.Status{Label: LaunchdLabel, Kind: string(service.KindLaunchd), Loaded: f.loaded, Running: f.loaded}
 }
 
 func (f *fakeForwarder) touched() bool { return len(f.calls) > 0 }
@@ -60,18 +92,22 @@ type fakeBrainsrv struct {
 	healthStatus int
 	writeStatus  int
 	endpoints    []Endpoint
+	key          string
 	mu           sync.Mutex
 	requests     []string
 }
 
 func newFakeBrainsrv(t *testing.T) *fakeBrainsrv {
 	t.Helper()
-	f := &fakeBrainsrv{healthStatus: http.StatusOK, writeStatus: http.StatusOK}
+	f := &fakeBrainsrv{healthStatus: http.StatusOK, writeStatus: http.StatusOK, key: testKey}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.requests = append(f.requests, r.Method+" "+r.URL.RequestURI())
 		f.mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer "+testKey {
+		f.mu.Lock()
+		key := f.key
+		f.mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer "+key {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"invalid credentials"}`))
 			return
@@ -146,6 +182,9 @@ func newConnectFixture(t *testing.T) *connectFixture {
 	t.Setenv("BEACON_VECTOR_BIN", "")
 	fb := newFakeBrainsrv(t)
 	fwd := &fakeForwarder{unitPath: filepath.Join(home, "unit.plist")}
+	oldPoll := stopPollInterval
+	stopPollInterval = time.Millisecond
+	t.Cleanup(func() { stopPollInterval = oldPoll })
 	return &connectFixture{
 		brainsrv: fb,
 		fwd:      fwd,
@@ -367,8 +406,8 @@ func TestBackfillClearsCheckpointsAndALaterConnectResumes(t *testing.T) {
 	if _, err := os.Stat(CheckpointDir(true)); !os.IsNotExist(err) {
 		t.Fatalf("--backfill must clear the checkpoints: %v", err)
 	}
-	if fx.fwd.calls[0] != "unload" {
-		t.Fatalf("--backfill must stop Vector before clearing checkpoints: %v", fx.fwd.calls)
+	if got := strings.Join(fx.fwd.calls, ","); !strings.HasPrefix(got, "write ") || !strings.HasSuffix(got, ",unload,load") {
+		t.Fatalf("--backfill must write the new unit, then stop Vector before clearing checkpoints and loading: %v", fx.fwd.calls)
 	}
 	config, _ := os.ReadFile(VectorConfigPath(true))
 	if !strings.Contains(string(config), `read_from = "beginning"`) {

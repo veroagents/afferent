@@ -77,3 +77,22 @@ func TestRenderedConfigPassesRealVectorValidate(t *testing.T) {
 		t.Fatalf("Vector rejected the pack template: %v\n%s", err, out)
 	}
 }
+
+// Literal values with $ and " survive Vector's interpolation and TOML parsing: a real Vector
+// accepts the render (it fails with "Missing environment variable" on an unescaped $VAR).
+func TestRenderedConfigWithDollarAndQuotePassesRealVectorValidate(t *testing.T) {
+	vector := realVector(t)
+	dir := filepath.Join(t.TempDir(), "state$FOOBAR_UNSET")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := RenderOptions{
+		LogPath:  filepath.Join(dir, `logs "q" $NOPE_UNSET`, "runtime.jsonl"),
+		URL:      "https://brain.example.com/brain$x",
+		Scope:    "ws.w1.people.m.harness",
+		Backfill: true,
+	}
+	if err := preflightVectorConfig(vector.Path, dir, opts); err != nil {
+		t.Fatalf("Vector %s rejected a render with $ and \" in literals: %v", vector.Version, err)
+	}
+}

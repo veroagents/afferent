@@ -23,6 +23,9 @@ const (
 	SecretsFileName    = "vector-secrets.json"
 	VectorConfigName   = "vector.toml"
 	DataDirName        = "vector-data"
+	// DestinationFileName records which (url, scope) the data dir's checkpoints and disk
+	// buffer belong to. It survives a plain disconnect, like the data dir.
+	DestinationFileName = "data-destination.json"
 )
 
 // Dir is the forwarder's state directory for the selected endpoint mode.
@@ -33,6 +36,38 @@ func ConnectionPath(userMode bool) string   { return filepath.Join(Dir(userMode)
 func SecretsPath(userMode bool) string      { return filepath.Join(Dir(userMode), SecretsFileName) }
 func VectorConfigPath(userMode bool) string { return filepath.Join(Dir(userMode), VectorConfigName) }
 func DataDir(userMode bool) string          { return filepath.Join(Dir(userMode), DataDirName) }
+
+// DestinationPath locates the data dir's destination record.
+func DestinationPath(userMode bool) string { return filepath.Join(Dir(userMode), DestinationFileName) }
+
+// Destination is where the lines in the data dir's buffer were meant to go.
+type Destination struct {
+	URL   string `json:"url"`
+	Scope string `json:"scope"`
+}
+
+func (d Destination) encode() []byte {
+	data, _ := json.MarshalIndent(d, "", "  ")
+	return append(data, '\n')
+}
+
+// dataDirDestinationMismatch reports whether the data dir holds anything (checkpoints or a
+// buffer) recorded for a destination other than want, or for an unknown one.
+func dataDirDestinationMismatch(userMode bool, want Destination) bool {
+	entries, err := os.ReadDir(DataDir(userMode))
+	if err != nil || len(entries) == 0 {
+		return false
+	}
+	data, err := os.ReadFile(DestinationPath(userMode))
+	if err != nil {
+		return true
+	}
+	var got Destination
+	if json.Unmarshal(data, &got) != nil {
+		return true
+	}
+	return got != want
+}
 
 // CheckpointDir is where Vector keeps the file source's checkpoints inside DataDir.
 func CheckpointDir(userMode bool) string { return filepath.Join(DataDir(userMode), SourceID) }
@@ -86,15 +121,12 @@ func SaveConnection(userMode bool, c Connection) error {
 	return writeFileAtomic(ConnectionPath(userMode), append(data, '\n'), 0o600)
 }
 
-// WriteSecrets stores the key in the file Vector's secret backend reads, atomically and 0600.
-func WriteSecrets(userMode bool, key string) error {
+// checkStorableKey refuses to put anything but a brainsrv spk_ key in the secrets file.
+func checkStorableKey(key string) error {
 	if !strings.HasPrefix(key, brainsrvcfg.KeyPrefix) || len(key) == len(brainsrvcfg.KeyPrefix) {
 		return errors.New("refusing to store a credential that is not a brainsrv spk_ key")
 	}
-	if err := ensureDir(userMode); err != nil {
-		return err
-	}
-	return writeFileAtomic(SecretsPath(userMode), []byte(SecretsFileContent(key)), 0o600)
+	return nil
 }
 
 // ReadStoredKey returns the key from the secrets file, for status's health check.
