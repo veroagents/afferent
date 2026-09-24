@@ -1,6 +1,6 @@
 # PLAN — afferent (Beacon fork) ↔ brainsrv
 
-Status: v0.2 · 2026-09-24 (review changes folded in, see §7) · implements [`SPEC.md`](SPEC.md) v0.1
+Status: v0.3 (authsrv end-to-end direction added; see ★) · 2026-09-24 (review changes folded in, see §7) · implements [`SPEC.md`](SPEC.md) v0.1
 Verified against: `agent-beacon` @ `c03b02f` (local clone `original-agent-beacon/`)
 and `brainsrv` @ `d8bcd0f` (`~/projects/brainsrv`).
 
@@ -8,6 +8,87 @@ The SPEC holds up in outline, but checking both codebases turned up **24
 places where it assumes something that isn't true** (§0). This plan keeps the
 SPEC's goals and build order. It fixes those assumptions and adds the
 brainsrv prerequisites they uncovered.
+
+---
+
+## ★ Direction v0.3 (2026-09-24): authsrv end to end, own `afferent` CLI, no Vector
+
+This supersedes the credential and transport parts of §1.2, §4 Phase 5 and
+§5. What is already built stays: the brainsrv Phase 1 and 4 server work, the
+capture mapping, the Phase 2 memory write-through, and the label sanitizer.
+
+### What the end user does
+```
+brew install veroagents/tap/afferent
+afferent setup          # install capture → browser sign-in (authsrv device flow) → start forwarder → configure agents' MCP
+```
+No key files, no scopes, no URLs, no Vector.
+
+### Principles
+1. **authsrv is the only issuer.** brainsrv never mints or stores user
+   credentials; it only verifies authsrv ES256 JWTs (P10: `sub`→principal,
+   claim→grant templates, `X-Context` selects the Context). There are no
+   `spk_` keys on laptops.
+2. **Identity decides scope.** A member's scope comes from token claims
+   through brainsrv grant templates. It is never a client-chosen flag.
+3. **One binary.** `afferent` is a new program inside the fork at
+   `cli/beacon/cmd/afferent/`. It has its own command tree and uses Beacon's
+   internal packages as libraries. All of it is new files, so upstream rebases
+   stay clean. Only `afferent` ships, through `.goreleaser.afferent.yaml`.
+4. **The forwarder is built in, not Vector.** It is a Go tailer in the
+   `afferent` binary:
+   - It keeps a checkpoint per file, by inode, across Beacon's
+     `.1`–`.5` rotation.
+   - It batches ≤5,000 lines, gzips, retries on 5xx and drops on 4xx.
+   - At-least-once delivery is safe because brainsrv dedupes on `event.id`.
+   - It refreshes its own access tokens. Vector cannot do that, which is why
+     Vector goes.
+5. **Agents read through brainsrv's own MCP** (`/mcp`, streamable HTTP)
+   using an authsrv token. Beacon's MCP is not shipped to users.
+
+### Flow
+```
+afferent login ──RFC 8628 device flow──► authsrv (/oauth/device/code → browser approve → /oauth/token)
+      ◄── access JWT (aud=brainsrv, sub=user, tenant_id, account_id, roles; 15 min) + refresh token (Keychain)
+afferent forwarder ──Bearer JWT + X-Context──► brainsrv /v1/ingest/beacon/runtime   (refreshes before expiry)
+agents ──────────── authsrv token ───────────► brainsrv /mcp
+```
+
+### Verified facts (vero-local, 2026-09-24)
+- authsrv advertises and serves the device flow. `deviced-cli` is an existing
+  public device-flow client (migration 017).
+- User tokens carry `sub`, `account_id`, `tenant_id`, `email`, `roles` and
+  `scopes`. `aud` comes from the client's registration. Access TTL is 15 min.
+- **Blocker: device-flow refresh tokens are never stored.**
+  `IssueUserToken` returns a random handle, and nothing writes the
+  `user_refresh:*` key its comment describes. `/oauth/token` accepts only the
+  `device_code` grant, and `/oauth2/token` (fosite) only knows auth-code
+  refresh tokens.
+- `/oauth2/token-exchange` needs a confidential client and adds no `act`
+  chain, so the CLI does not use it. It asks for `aud=brainsrv` directly.
+- **brainsrv gap:** grant templates map `claim=value` to a fixed scope, with
+  no `{sub}` or `{tenant_id}` substitution. So per-member scopes cannot be
+  derived from claims yet.
+
+### Work by repo
+| # | Repo | Work |
+|---|---|---|
+| D1 | authsrv | Register public client `afferent-cli` (device_code + refresh_token, `audience={brainsrv}`, scopes openid profile email) as a migration like 017 |
+| D2 | authsrv | **Persist and redeem device-flow refresh tokens.** Use the Postgres `oauth2_refresh_tokens` store, accept `grant_type=refresh_token` for them, rotate on use, revoke via `/oauth2/revoke`. Each login is its own session, which gives per-device revocation. |
+| D3 | brainsrv | Grant-template substitution: `scope_path` may contain `{sub}` and `{tenant_id}`, sanitized to ltree labels with the shared label rules. Example template: any user token ⇒ `ws.{tenant_id}.people.{sub}.harness` with read+write+forget. Plus the afferent Context's `auth_config` (issuer, JWKS, `aud=brainsrv`, autoprovision). |
+| D4 | brainsrv | Beacon ingest and `/mcp` accept the JWT path. Verify that X-Scope is optional for JWTs and defaults to the member scope, or keep it required and have the CLI send the templated scope it learns at login. |
+| D5 | afferent | Scaffold `cmd/afferent` with `login` / `logout` / `whoami`: device flow, refresh token in the macOS Keychain (file fallback 0600 elsewhere), auto-refresh. |
+| D6 | afferent | Built-in forwarder: `afferent forward` running as a launchd/systemd service, with checkpoints, rotation, batching and gzip. It reuses the Phase 5 tests (delivery, restart, backfill duplicates, brainsrv down). Delete the Vector pack. |
+| D7 | afferent | `afferent setup` (capture install + login + forwarder), `afferent mcp config` (writes the brainsrv `/mcp` entry for Claude Code, Cursor and Codex), `afferent sync` (history backfill via the harness readers). The memory write-through uses the same token. |
+| D8 | afferent | Packaging: a Homebrew `afferent` formula with no Vector dependency. |
+
+**Order:** D1 → D5 (login works with 15-min tokens). Then D3 → D4, which is
+end-to-end with a real token. D2 is needed before D6 can run unattended. Then
+D7 and D8.
+
+**Test plan:** each step is tested live on vero-local with a real browser
+approval. The first test is D1 + D5: device login as `drew@vero.localhost`,
+decode the claims, and call brainsrv with the JWT.
 
 ---
 
@@ -712,3 +793,9 @@ Run on the dev-local stack. `docker compose up`, then
 - Phase 1 lands first and is gated on a new agentd live test (§2.1) before the
   fork starts. (The `smoke_brainsrv.sh` the review mentioned doesn't exist
   yet; §2.1 creates it.)
+
+**v0.3**: authsrv end-to-end direction (★ section).
+- Own `afferent` binary, a built-in forwarder instead of Vector, and brainsrv
+  MCP for reads.
+- Recorded the authsrv refresh-token blocker, the grant-template substitution
+  gap, and the D1–D8 work list.
