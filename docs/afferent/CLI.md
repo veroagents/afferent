@@ -1,5 +1,34 @@
 # The `afferent` CLI
 
+## User guide
+
+```sh
+brew install veroagents/tap/afferent   # D8; until then: cd cli/beacon && go build -o afferent ./cmd/afferent
+afferent setup
+```
+
+That's it. `setup` walks through six steps and asks before each change:
+
+1. **capture**: installs Beacon's capture hooks for the coding agents it
+   finds (Claude Code, Codex, Cursor). They write to Beacon's runtime log.
+2. **login**: signs you in with your browser, if you are not signed in.
+3. **scope**: shows the member scope brainsrv gives you.
+4. **service**: starts the forwarder in the background. It sends the log to
+   brainsrv as you.
+5. **mcp**: adds a `brain` MCP server to your agents, so they can read
+   brainsrv. It shows the diff first.
+6. **sync**: offers to send the history your agents already keep.
+
+Afterwards, check it with `afferent status`, then restart your agents (or run
+`/mcp` in Claude Code). You can run `setup` again at any time: steps that are
+already done say so. Useful flags:
+- `--dry-run` shows everything and changes nothing.
+- `--yes` answers every question.
+- `--skip sync,mcp` leaves out steps.
+- `--harness claude,codex` limits the agents.
+
+## Code
+
 `afferent` is the fork's own binary (PLAN v0.3, D5). It has its own command
 tree and does not reuse Beacon's root command. The code is new files only:
 
@@ -12,6 +41,11 @@ tree and does not reuse Beacon's root command. The code is new files only:
 | `cli/beacon/internal/afferent/brain` | brainsrv client (`/v1/whoami`) |
 | `cli/beacon/internal/afferent/forward` | the built-in forwarder: tail, checkpoints, batching, delivery, status (D6) |
 | `cli/beacon/internal/afferent/service` | launchd / systemd `--user` unit generation and loading (D6) |
+| `cli/beacon/internal/afferent/mcpproxy` | `mcp proxy`: stdio MCP ↔ brainsrv `/mcp` (D7) |
+| `cli/beacon/internal/afferent/mcpconfig` | `mcp config`: the Claude Code, Cursor and Codex config writers (D7) |
+| `cli/beacon/internal/afferent/history` | `sync`: Beacon's Claude Code and Codex collectors (D7) |
+| `cli/beacon/internal/afferent/capture` | setup's capture step: Beacon's hook installers (D7) |
+| `cli/beacon/internal/afferent/member` | the signed-in member (settings, tokens, scope) for code outside the CLI, such as the memory backend (D7) |
 | `cli/beacon/internal/afferent/afferenttest` | fake authsrv for tests |
 
 ## Build and run
@@ -27,12 +61,20 @@ go build -o afferent ./cmd/afferent
 ./afferent forward --once --backfill   # send the runtime log once, from the oldest archive
 ./afferent service install             # run `afferent forward` in the background
 ./afferent status
+./afferent mcp config --dry-run         # what the agents' configs would get
+./afferent sync --since 720h           # backfill the last 30 days of history
+./afferent setup --dry-run
 ```
 
-Tests: `go test ./internal/afferent/...`. They use an in-process fake authsrv and
-brainsrv, a fake `security` tool, a fake service loader, and temp
-directories. They never touch the real Keychain, `~/.beacon`, launchd or
-systemd.
+Tests: `go test ./internal/afferent/... ./internal/learning/`. They use
+in-process fakes and temp directories:
+- a fake authsrv and brainsrv, including a streamable-HTTP `/mcp`;
+- a fake `security` tool, a fake service loader, a fake capture installer and
+  a fake `claude` CLI lookup;
+- a temp HOME.
+
+They never touch the real Keychain, `~/.beacon`, `~/.claude`, `~/.cursor`,
+`~/.codex`, launchd or systemd.
 
 The Makefile and `.goreleaser.yaml` are upstream files and do not build
 `afferent`. Packaging comes in D8, through `.goreleaser.afferent.yaml`.
@@ -230,7 +272,9 @@ afferent forward [--backfill] [--once] [--scope S] [--log-path P | --system] [--
   `runtime.jsonl` and the archives Beacon rotates it into (`.1` to `.5` at
   10 MiB).
 - **Where it starts.**
-  - The first run starts at the end of the live log, at a line boundary.
+  - The first run starts at the end of the live log, at a line boundary. The
+    checkpoints are placed when the forwarder starts, before it waits for a
+    sign-in or a scope, so events captured while it waits are sent later.
   - `--backfill` starts from the oldest retained archive. brainsrv dedupes on
     `event.id`, so history it already has comes back as `duplicate`.
 - **Checkpoints.** The forwarder keeps one checkpoint per file identity (device
@@ -318,9 +362,9 @@ afferent service status
   - It is loaded with `daemon-reload`, `enable` and `restart`.
   - `Restart=always`. Its logs go to the journal:
     `journalctl --user -u afferent-forwarder.service`.
-- The job runs `<this binary> forward --config-dir <dir>`. `--program`
-  overrides the binary, for example the stable Homebrew path
-  `/opt/homebrew/bin/afferent` instead of a versioned Cellar path.
+- The job runs `<this binary> forward --config-dir <dir>`. A Homebrew Cellar
+  path is replaced by the stable one (`/opt/homebrew/bin/afferent`), so an
+  upgrade does not break the job. `--program` overrides the binary.
 - `install` saves the current settings to `config.json`, so the service uses
   the same issuer, brainsrv and Context as the shell that installed it. It
   warns if you are not signed in.
@@ -344,3 +388,187 @@ them.
 - **forwarder:** the status file: state and paused reason, when it was last
   updated, the log path, the last success, the last error, the totals, and
   the lag per file.
+
+## setup (D7)
+
+```
+afferent setup [--harness claude,codex,cursor|all|auto] [--yes] [--dry-run]
+               [--skip capture,login,scope,service,mcp,sync] [--since D] [--no-browser]
+```
+
+It runs the steps in the user guide, in order, and ends with a summary of
+each step: done, already done, declined, skipped or failed. A failure in one
+step does not stop the others, but it makes the exit code non-zero.
+
+- **Questions.** Every step that changes something prints what it will
+  change and asks `[Y/n]`. `--yes` answers yes. No answer (end of input)
+  means no, so a script without `--yes` changes nothing.
+- **capture.** Beacon's own hook installers, by import
+  (`internal/endpoint/hooks`), install hooks for `claude`, `codex` and
+  `cursor`, at user level, pointed at the runtime log the forwarder reads.
+  - This is the hooks half of `beacon endpoint install --harness X`.
+  - The OTLP half is left out: it needs an OpenTelemetry collector binary
+    and service that afferent does not ship, and the hooks already record
+    every prompt, tool call and session event.
+  - The hook binary is the one embedded in this build.
+- **login** runs the device flow only when you are not signed in.
+- **scope** asks brainsrv `/v1/whoami` and caches the answer.
+- **service** is `afferent service install`. It installs or updates the job
+  and restarts it.
+- **mcp** is `afferent mcp config`. It shows the diff, then asks.
+- **sync** is `afferent sync` for the agents with history, after a
+  question. `--since` passes through.
+- **`--dry-run`** changes nothing anywhere:
+  - no file writes and no backups;
+  - no token refresh and no `/v1/whoami` call;
+  - no `launchctl` or `systemctl` changes;
+  - no claude CLI.
+
+  It only reads: the stored credentials, the service status, and the
+  agents' configs, whose diffs it shows.
+
+## mcp proxy (D7)
+
+`afferent mcp proxy` is the MCP server the agents start. It speaks stdio MCP
+to the agent: one JSON-RPC message per line on stdin and stdout. For each
+message it sends `POST <brainsrv>/mcp` (streamable HTTP) with:
+- `Authorization: Bearer <access token>` (from the refreshing token source)
+- `X-Context`
+- `X-Scope`: the member base scope, found the same way as the forwarder's
+  (`--scope`, `AFFERENT_SCOPE`, config, `/v1/whoami`, or the cache)
+- `Accept: application/json, text/event-stream`
+- `Mcp-Session-Id` and `Mcp-Protocol-Version`, once brainsrv has assigned
+  them
+
+brainsrv's answers go back to the agent:
+- A JSON answer is written as one line.
+- A `text/event-stream` answer: each event's `data` (multi-line data is
+  joined) is written as one line. The stream is closed once every request
+  it carries has its response.
+- Notifications and the agent's own responses to server requests expect 202,
+  and produce no output.
+
+stdout carries only protocol messages. Logs go to stderr.
+
+**Sessions and token refresh.** brainsrv binds a `/mcp` session to the sha256
+of the bearer token, so a session dies at every refresh (about every 15 min).
+The proxy keeps the agent's `initialize` params and recovers without the
+agent noticing:
+- When the access token changes, it opens a new session first:
+  `initialize` with the saved params, then `notifications/initialized`. Both
+  answers are discarded.
+- When brainsrv refuses a message, it recovers and sends the message again
+  once:
+  - on a 401, it forces one token refresh, then opens a new session;
+  - on a 403, it asks `/v1/whoami` for the scope again (a session opened with
+    another token also gets 403), then opens a new session;
+  - on a 404 for a session it sent, it opens a new session.
+
+**Errors** become JSON-RPC error responses. The proxy never exits on them,
+and requests run concurrently.
+
+| case | code |
+|---|---|
+| a line that is not JSON, or over 32 MiB | -32700 (id null) |
+| not an object or batch, or no method, result or error | -32600 |
+| signed out, or refused after the one retry | -32001 (the message says to run `afferent login` when signed out) |
+| brainsrv unreachable or 5xx | -32000 |
+
+## mcp config (D7)
+
+```
+afferent mcp config [--harness claude,cursor,codex|all|auto] [--dry-run] [--remove] [--program PATH]
+```
+
+It registers an MCP server named `brain`. Its command is the absolute path of
+this binary (the stable Homebrew path when installed by brew), and its args
+are `["mcp", "proxy"]`, plus `--config-dir <dir>` when a non-default config
+dir is in use. The entry goes in each agent's **user-level** config:
+
+| Agent | File | How |
+|---|---|---|
+| Claude Code | `~/.claude.json` `mcpServers.brain` | `claude mcp add --scope user brain -- <afferent> mcp proxy` when the `claude` CLI is on PATH, because Claude Code rewrites that file itself. Otherwise the one member is edited in place. If the CLI fails, it falls back to the in-place edit. |
+| Cursor | `~/.cursor/mcp.json` `mcpServers.brain` | edited in place. The file is created if missing. |
+| Codex | `~/.codex/config.toml` `[mcp_servers.brain]` | a marked block (`# >>> afferent …` / `# <<< afferent <<<`) is appended, or replaced where it is. Nothing outside the block is touched. It refuses when the file already defines `brain` itself, or defines `mcp_servers` as an inline table or dotted key. |
+
+- **Safe edits.** JSON is edited byte-preserving: key order, formatting and
+  every other server and setting keep their exact bytes. Only the `brain`
+  member is inserted, replaced or removed. The result is validated before it
+  is written. A file that is not plain JSON, or a symlink, is refused.
+- **Idempotent.** An identical entry is left alone (`already configured`).
+  A changed binary path updates it.
+- **Backups.** Before a change, the file is copied to `<file>.afferent.bak`.
+  The write is atomic and keeps the file's mode.
+- `--remove` takes the entry out. `--dry-run` prints a diff per file, and the
+  claude command it would run, and changes nothing.
+- `auto` (the default) picks the agents found in your home: `~/.claude` or
+  `~/.claude.json`, `~/.cursor`, `~/.codex`, or the `claude` or `codex` CLI.
+- Upstream Beacon has no MCP-config writer to reuse (`beacon mcp` only prints
+  a snippet), so these writers are new.
+
+## sync (D7)
+
+```
+afferent sync [--harness claude,codex|all|auto] [--since D] [--no-wait] [--log-path P | --system]
+```
+
+`sync` backfills the session history Claude Code (`~/.claude/projects`) and
+Codex (`~/.codex/sessions`) already keep. It appends that history to Beacon's
+runtime log, and the forwarder sends it.
+- It runs Beacon's own collectors by import: `claudesession.CollectOnce` and
+  `codexsession.CollectOnce`, the code behind `beacon endpoint claude sync`
+  and `beacon endpoint codex sync`. Every event is marked
+  `collection_method=poll`.
+- **Cursors are Beacon's.** It uses `~/.beacon/endpoint/state/claude.json`
+  and `codex.json`, the same defaults as Beacon's commands, not files owned
+  by afferent. The runtime log is shared. With separate cursors, a user who
+  also runs Beacon's sync would get every session written twice. With one
+  set, a session is written once, whoever sweeps first. Running `sync` again
+  only adds what is new.
+- **`--since 720h`** skips sessions not written in that window. It marks
+  them as read at their current end in the cursor file, so later runs skip
+  them too, and a resumed old session continues from its end.
+- **It never loses the backfill to a first run.** A first forwarder run
+  starts at the end of the log. So before writing, `sync` places the
+  forwarder's checkpoints (`forward.Prime`) when no forwarder has run yet.
+  A running forwarder places its own when it starts.
+- **Large histories.** The runtime log keeps about 60 MiB (live file plus 5
+  archives). When Beacon's collector stops because more would rotate its
+  own output away, `sync` drains the log and sweeps again:
+  - with no forwarder running, it sends the log itself (`forward --once`);
+  - otherwise it waits, up to 30 min, for the running forwarder's lag to
+    reach 0.
+
+  `--no-wait` stops instead and says to run it again.
+
+## Memory write-through on the afferent token (D7)
+
+Beacon's memory store (`beacon memory`, and Beacon's MCP and dashboard)
+writes approved memories through to brainsrv (PLAN Phase 2). It picks the
+credential this way:
+
+| Setting | Backend |
+|---|---|
+| `BEACON_MEMORY_BACKEND=local` (or `off`, `none`) | local SQLite only |
+| `BEACON_BRAINSRV_KEY_FILE` set | the `spk_` key file, as before (needs `BEACON_MEMORY_BACKEND=brainsrv`, `BEACON_BRAINSRV_URL`, `BEACON_BRAINSRV_SCOPE`) |
+| otherwise, signed in to afferent | the afferent token |
+| otherwise | local only, with a warning when `BEACON_MEMORY_BACKEND=brainsrv` |
+
+With the afferent token:
+- Every request carries `Authorization: Bearer <access JWT>` from the
+  refreshing token source (one forced refresh and a retry on 401) and
+  `X-Context` from the afferent config.
+- The URL is the afferent `brainsrv_url`.
+- The base scope is the member scope: the configured `scope`, else the
+  forwarder's cached `/v1/whoami` answer, else `/v1/whoami`.
+- `BEACON_BRAINSRV_URL` and `BEACON_BRAINSRV_SCOPE` still override the URL
+  and the scope.
+- The sign-in is looked up at most every 30 s per process: stores are opened
+  per request, and on macOS reading the Keychain runs `/usr/bin/security`.
+- `beacon memory brainsrv status` shows `auth afferent` or `auth key`.
+
+The code is in new files: `internal/learning/brainsrv_afferent.go` and
+`internal/afferent/member`. The fork's own `backend.go`, `brainsrv.go` and
+`cmd/memory_brainsrv.go` call into them. The upstream seam files
+(`store.go`, `cmd/memory.go`, `mcpserver/server.go`, `dashboard/memory.go`)
+are unchanged.

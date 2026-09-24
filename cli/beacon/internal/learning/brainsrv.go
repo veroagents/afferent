@@ -65,6 +65,10 @@ type BrainsrvBackend struct {
 	cfg    brainsrvcfg.Config
 	key    string
 	client *http.Client
+	// tokens and xContext are set for afferent credentials (an authsrv JWT
+	// and its Context) instead of key; see brainsrv_afferent.go.
+	tokens   TokenSource
+	xContext string
 }
 
 // NewBrainsrvBackend returns a backend for the store at storePath. A nil
@@ -127,30 +131,35 @@ func isConflict(err error) bool {
 }
 
 func (b *BrainsrvBackend) do(ctx context.Context, method, path, scope, idem string, in, out interface{}) error {
-	var body io.Reader
+	var payload []byte
 	if in != nil {
-		data, err := json.Marshal(in)
-		if err != nil {
+		var err error
+		if payload, err = json.Marshal(in); err != nil {
 			return err
 		}
-		body = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, b.cfg.URL+path, body)
-	if err != nil {
-		return err
+	newReq := func() (*http.Request, error) {
+		var body io.Reader
+		if in != nil {
+			body = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, b.cfg.URL+path, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		if in != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if scope != "" {
+			req.Header.Set("X-Scope", scope)
+		}
+		if idem != "" {
+			req.Header.Set("Idempotency-Key", idem)
+		}
+		return req, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+b.key)
-	req.Header.Set("Accept", "application/json")
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if scope != "" {
-		req.Header.Set("X-Scope", scope)
-	}
-	if idem != "" {
-		req.Header.Set("Idempotency-Key", idem)
-	}
-	resp, err := b.client.Do(req)
+	resp, err := b.send(ctx, newReq)
 	if err != nil {
 		return err
 	}

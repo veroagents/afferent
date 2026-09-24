@@ -1,9 +1,9 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -49,67 +49,72 @@ settings to config.json, so the service uses the same brainsrv, Context and
 issuer as this command. Running it again updates and restarts the service.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			r, err := a.resolve()
-			if err != nil {
-				return err
-			}
-			m, err := a.serviceManager()
-			if err != nil {
-				return err
-			}
-			if program == "" {
-				exe := os.Executable
-				if a.env.Executable != nil {
-					exe = a.env.Executable
-				}
-				if program, err = exe(); err != nil {
-					return fmt.Errorf("locate the afferent binary (use --program): %w", err)
-				}
-			}
-			if program, err = filepath.Abs(program); err != nil {
-				return err
-			}
-			stateDir := a.stateDir(r)
-			args := []string{"forward", "--config-dir", r.dir}
-			if lf.logPath != "" {
-				args = append(args, "--log-path", a.runtimeLog(lf))
-			} else if lf.system {
-				args = append(args, "--system")
-			}
-			spec := service.Spec{
-				Program: program,
-				Args:    args,
-				LogPath: filepath.Join(stateDir, forward.ServiceLogFile),
-			}
-			if d := a.env.Getenv(config.EnvStateDir); d != "" {
-				spec.Env = map[string]string{config.EnvStateDir: d}
-			}
-			// The service reads config.json, not this shell's environment.
-			if err := config.Save(r.dir, r.cfg); err != nil {
-				return fmt.Errorf("save settings for the service: %w", err)
-			}
-			if _, err := r.tokenSource(a.env.Now).Credentials(cmd.Context()); errors.Is(err, auth.ErrLoginRequired) {
-				fmt.Fprintln(a.env.Stderr, "Note: you are not signed in. The forwarder will wait until you run `afferent login`.")
-			}
-			path, err := m.Install(spec)
-			if err != nil {
-				return err
-			}
-			out := a.env.Stdout
-			fmt.Fprintf(out, "Installed %s (%s) at %s.\n", m.Name(), m.Kind, path)
-			fmt.Fprintf(out, "It runs: %s %s\n", program, strings.Join(args, " "))
-			if m.Kind == service.KindSystemd {
-				fmt.Fprintf(out, "Logs:    journalctl --user -u %s\n", service.SystemdUnit)
-			} else {
-				fmt.Fprintf(out, "Logs:    %s\n", spec.LogPath)
-			}
-			fmt.Fprintln(out, "Check it with `afferent status`.")
-			return nil
+			return a.installService(cmd.Context(), lf, program)
 		},
 	}
 	lf.add(cmd)
 	cmd.Flags().StringVar(&program, "program", "", "afferent binary the service runs (default: this binary)")
 	return cmd
+}
+
+// serviceSpec is what `service install` would install.
+func (a *app) serviceSpec(r *resolved, lf logFlags, program string) (service.Spec, error) {
+	program, err := a.program(program)
+	if err != nil {
+		return service.Spec{}, err
+	}
+	args := []string{"forward", "--config-dir", r.dir}
+	if lf.logPath != "" {
+		args = append(args, "--log-path", a.runtimeLog(lf))
+	} else if lf.system {
+		args = append(args, "--system")
+	}
+	spec := service.Spec{
+		Program: program,
+		Args:    args,
+		LogPath: filepath.Join(a.stateDir(r), forward.ServiceLogFile),
+	}
+	if d := a.env.Getenv(config.EnvStateDir); d != "" {
+		spec.Env = map[string]string{config.EnvStateDir: d}
+	}
+	return spec, nil
+}
+
+// installService installs (or updates and restarts) the forwarder service.
+func (a *app) installService(ctx context.Context, lf logFlags, program string) error {
+	r, err := a.resolve()
+	if err != nil {
+		return err
+	}
+	m, err := a.serviceManager()
+	if err != nil {
+		return err
+	}
+	spec, err := a.serviceSpec(r, lf, program)
+	if err != nil {
+		return err
+	}
+	// The service reads config.json, not this shell's environment.
+	if err := config.Save(r.dir, r.cfg); err != nil {
+		return fmt.Errorf("save settings for the service: %w", err)
+	}
+	if _, err := r.tokenSource(a.env.Now).Credentials(ctx); errors.Is(err, auth.ErrLoginRequired) {
+		fmt.Fprintln(a.env.Stderr, "Note: you are not signed in. The forwarder will wait until you run `afferent login`.")
+	}
+	path, err := m.Install(spec)
+	if err != nil {
+		return err
+	}
+	out := a.env.Stdout
+	fmt.Fprintf(out, "Installed %s (%s) at %s.\n", m.Name(), m.Kind, path)
+	fmt.Fprintf(out, "It runs: %s %s\n", spec.Program, strings.Join(spec.Args, " "))
+	if m.Kind == service.KindSystemd {
+		fmt.Fprintf(out, "Logs:    journalctl --user -u %s\n", service.SystemdUnit)
+	} else {
+		fmt.Fprintf(out, "Logs:    %s\n", spec.LogPath)
+	}
+	fmt.Fprintln(out, "Check it with `afferent status`.")
+	return nil
 }
 
 func (a *app) serviceUninstallCmd() *cobra.Command {

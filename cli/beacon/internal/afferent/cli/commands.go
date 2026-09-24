@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -23,72 +24,76 @@ func (a *app) loginCmd() *cobra.Command {
 		Short: "Sign in with your browser (OAuth device flow)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := cmd.Context()
-			r, err := a.resolve()
-			if err != nil {
-				return err
-			}
-			out := a.env.Stdout
-			ep, err := r.client.Discover(ctx)
-			if err != nil {
-				return err
-			}
-			dc, err := r.client.RequestDeviceCode(ctx, ep, scope)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(out, "To sign in, open %s\nand enter the code: %s\n\n", dc.VerificationURI, dc.UserCode)
-			if u := dc.BrowserURL(); u != "" && !noBrowser && a.env.OpenBrowser != nil {
-				if err := a.env.OpenBrowser(u); err != nil {
-					fmt.Fprintf(a.env.Stderr, "Could not open a browser (%v); open the link above yourself.\n", err)
-				} else {
-					fmt.Fprintln(out, "Opened your browser. Waiting for approval…")
-				}
-			} else {
-				fmt.Fprintln(out, "Waiting for approval…")
-			}
-			tr, err := r.client.PollToken(ctx, ep, dc)
-			if err != nil {
-				return err
-			}
-			creds, err := auth.NewCredentials(tr, ep.Issuer, r.cfg.ClientID, "", a.now())
-			if err != nil {
-				return err
-			}
-			// Read the previous session under the same lock as the write, so
-			// a refresh in another process cannot rotate it in between.
-			old, err := auth.SwapLocked(ctx, r.store, r.lock, creds)
-			if err != nil {
-				return fmt.Errorf("store credentials: %w", err)
-			}
-			// End the previous session on this machine, if any. Only send its
-			// refresh token to the issuer and client that issued it.
-			if old != nil && old.RefreshToken != "" && old.RefreshToken != creds.RefreshToken {
-				if old.Matches(ep.Issuer, r.cfg.ClientID) {
-					_ = r.client.Revoke(ctx, ep, old.RefreshToken, "refresh_token")
-				} else {
-					fmt.Fprintf(a.env.Stderr, "warning: replaced a session for %s (client %s) without revoking it; it stays valid until it expires\n", old.Issuer, old.ClientID)
-				}
-			}
-			// Remember the settings this login used, so later commands (and
-			// the forwarder) find these credentials without the same flags.
-			if err := config.Save(r.dir, r.cfg); err != nil {
-				fmt.Fprintf(a.env.Stderr, "warning: could not save %s: %v\n", config.Path(r.dir), err)
-			}
-			who := "unknown user"
-			if c, err := auth.DecodeClaims(creds.AccessToken); err == nil {
-				who = firstNonEmpty(c.Email, c.Subject, who)
-			}
-			fmt.Fprintf(out, "Signed in to %s as %s. Credentials stored in %s.\n", ep.Issuer, who, r.store.Name())
-			if creds.RefreshToken == "" {
-				fmt.Fprintln(out, "Note: the server issued no refresh token; you will need to log in again when this token expires.")
-			}
-			return nil
+			return a.login(cmd.Context(), noBrowser, scope)
 		},
 	}
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the sign-in link instead of opening a browser")
 	cmd.Flags().StringVar(&scope, "scope", auth.DefaultScope, "OAuth scopes to request")
 	return cmd
+}
+
+// login runs the device flow and stores the credentials.
+func (a *app) login(ctx context.Context, noBrowser bool, scope string) error {
+	r, err := a.resolve()
+	if err != nil {
+		return err
+	}
+	out := a.env.Stdout
+	ep, err := r.client.Discover(ctx)
+	if err != nil {
+		return err
+	}
+	dc, err := r.client.RequestDeviceCode(ctx, ep, scope)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "To sign in, open %s\nand enter the code: %s\n\n", dc.VerificationURI, dc.UserCode)
+	if u := dc.BrowserURL(); u != "" && !noBrowser && a.env.OpenBrowser != nil {
+		if err := a.env.OpenBrowser(u); err != nil {
+			fmt.Fprintf(a.env.Stderr, "Could not open a browser (%v); open the link above yourself.\n", err)
+		} else {
+			fmt.Fprintln(out, "Opened your browser. Waiting for approval…")
+		}
+	} else {
+		fmt.Fprintln(out, "Waiting for approval…")
+	}
+	tr, err := r.client.PollToken(ctx, ep, dc)
+	if err != nil {
+		return err
+	}
+	creds, err := auth.NewCredentials(tr, ep.Issuer, r.cfg.ClientID, "", a.now())
+	if err != nil {
+		return err
+	}
+	// Read the previous session under the same lock as the write, so
+	// a refresh in another process cannot rotate it in between.
+	old, err := auth.SwapLocked(ctx, r.store, r.lock, creds)
+	if err != nil {
+		return fmt.Errorf("store credentials: %w", err)
+	}
+	// End the previous session on this machine, if any. Only send its
+	// refresh token to the issuer and client that issued it.
+	if old != nil && old.RefreshToken != "" && old.RefreshToken != creds.RefreshToken {
+		if old.Matches(ep.Issuer, r.cfg.ClientID) {
+			_ = r.client.Revoke(ctx, ep, old.RefreshToken, "refresh_token")
+		} else {
+			fmt.Fprintf(a.env.Stderr, "warning: replaced a session for %s (client %s) without revoking it; it stays valid until it expires\n", old.Issuer, old.ClientID)
+		}
+	}
+	// Remember the settings this login used, so later commands (and
+	// the forwarder) find these credentials without the same flags.
+	if err := config.Save(r.dir, r.cfg); err != nil {
+		fmt.Fprintf(a.env.Stderr, "warning: could not save %s: %v\n", config.Path(r.dir), err)
+	}
+	who := "unknown user"
+	if c, err := auth.DecodeClaims(creds.AccessToken); err == nil {
+		who = firstNonEmpty(c.Email, c.Subject, who)
+	}
+	fmt.Fprintf(out, "Signed in to %s as %s. Credentials stored in %s.\n", ep.Issuer, who, r.store.Name())
+	if creds.RefreshToken == "" {
+		fmt.Fprintln(out, "Note: the server issued no refresh token; you will need to log in again when this token expires.")
+	}
+	return nil
 }
 
 func (a *app) logoutCmd() *cobra.Command {

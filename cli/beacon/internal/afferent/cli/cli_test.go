@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +31,30 @@ type harness struct {
 	logPath string
 	svc     *fakeLoader
 	home    string
+	// mcp serves brainsrv /mcp when set.
+	mcp http.HandlerFunc
+	// stdin feeds the command; lookPath finds external tools (none by
+	// default, so no real claude CLI is ever run); ran records runs.
+	stdin    string
+	lookPath func(string) (string, error)
+	ran      [][]string
+	capture  *fakeCapture
+}
+
+// fakeCapture stands in for Beacon's hook installers.
+type fakeCapture struct {
+	installed map[string]bool
+	installs  []string
+}
+
+func (f *fakeCapture) Status(h string) (bool, string, error) {
+	return f.installed[h], "/fake/" + h + "/settings", nil
+}
+
+func (f *fakeCapture) Install(h, logPath string, userMode bool) (string, error) {
+	f.installs = append(f.installs, h+" "+logPath)
+	f.installed[h] = true
+	return "/fake/" + h + "/settings", nil
 }
 
 func newHarness(t *testing.T) *harness {
@@ -47,11 +72,17 @@ func newHarness(t *testing.T) *harness {
 			h.ingest(w, r)
 			return
 		}
+		if r.URL.Path == "/mcp" && h.mcp != nil {
+			h.mcp(w, r)
+			return
+		}
 		h.whoami(w, r)
 	}))
 	h.logPath = filepath.Join(t.TempDir(), "runtime.jsonl")
 	h.svc = &fakeLoader{}
 	h.home = t.TempDir()
+	h.capture = &fakeCapture{installed: map[string]bool{}}
+	h.lookPath = func(string) (string, error) { return "", exec.ErrNotFound }
 	t.Cleanup(h.brain.Close)
 	h.envs = map[string]string{
 		config.EnvConfigDir:   h.dir,
@@ -80,6 +111,15 @@ func (h *harness) run(args ...string) (string, string, error) {
 			return service.Manager{Kind: service.KindLaunchd, Home: h.home, Loader: h.svc}, nil
 		},
 		Executable: func() (string, error) { return "/usr/local/bin/afferent", nil },
+		// A temp HOME: never the real ~/.claude, ~/.cursor, ~/.codex or ~/.beacon.
+		Home:     func() (string, error) { return h.home, nil },
+		Stdin:    strings.NewReader(h.stdin),
+		LookPath: func(n string) (string, error) { return h.lookPath(n) },
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			h.ran = append(h.ran, append([]string{name}, args...))
+			return nil, nil
+		},
+		Capture: h.capture,
 	}
 	root := NewRootCmd(env)
 	root.SetArgs(args)

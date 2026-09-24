@@ -9,14 +9,18 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/auth"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/capture"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/config"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/mcpconfig"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/service"
 	beaconauth "github.com/asymptote-labs/agent-beacon/cli/beacon/internal/auth"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/brewpath"
 )
 
 // Env is everything the commands touch outside the process.
@@ -39,6 +43,18 @@ type Env struct {
 	// Executable is this binary's path, for the service; nil means
 	// os.Executable.
 	Executable func() (string, error)
+
+	// Stdin feeds `mcp proxy` and setup's questions; nil means os.Stdin.
+	Stdin io.Reader
+	// Home is the user's home directory, where agent configs, session
+	// history and Beacon's sync cursors live; nil means os.UserHomeDir.
+	Home func() (string, error)
+	// LookPath and Run find and run external tools (the claude CLI for
+	// `mcp config`); nil means os/exec.
+	LookPath func(string) (string, error)
+	Run      mcpconfig.Runner
+	// Capture installs Beacon capture for setup; nil means Beacon's hooks.
+	Capture capture.Installer
 }
 
 // commands are added to the root by init() in the command files, so each
@@ -52,6 +68,7 @@ func DefaultEnv() *Env {
 	return &Env{
 		Stdout:      os.Stdout,
 		Stderr:      os.Stderr,
+		Stdin:       os.Stdin,
 		Getenv:      os.Getenv,
 		OpenBrowser: beaconauth.OpenBrowser,
 	}
@@ -180,6 +197,52 @@ func (a *app) resolve() (*resolved, error) {
 
 func (r *resolved) tokenSource(now func() time.Time) *auth.TokenSource {
 	return &auth.TokenSource{Store: r.store, LockPath: r.lock, Client: r.client, Now: now}
+}
+
+func (a *app) home() (string, error) {
+	if a.env.Home != nil {
+		return a.env.Home()
+	}
+	return os.UserHomeDir()
+}
+
+func (a *app) stdin() io.Reader {
+	if a.env.Stdin != nil {
+		return a.env.Stdin
+	}
+	return os.Stdin
+}
+
+func (a *app) capture() capture.Installer {
+	if a.env.Capture != nil {
+		return a.env.Capture
+	}
+	return capture.Hooks{}
+}
+
+// program is this binary's absolute path, for a service or an agent's MCP
+// config: override if set, else the executable, with a Homebrew Cellar path
+// turned into the stable one (so a brew upgrade does not break it).
+func (a *app) program(override string) (string, error) {
+	p := override
+	if p == "" {
+		exe := os.Executable
+		if a.env.Executable != nil {
+			exe = a.env.Executable
+		}
+		var err error
+		if p, err = exe(); err != nil {
+			return "", fmt.Errorf("locate the afferent binary (use --program): %w", err)
+		}
+		p = brewpath.Stable(p)
+	}
+	return filepath.Abs(p)
+}
+
+// configDirExplicit reports whether the config dir was chosen by flag or
+// env, so commands written into other programs' configs must carry it.
+func (a *app) configDirExplicit() bool {
+	return a.root.PersistentFlags().Changed("config-dir") || a.env.Getenv(config.EnvConfigDir) != ""
 }
 
 func (a *app) now() time.Time {

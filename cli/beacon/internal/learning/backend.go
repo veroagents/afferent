@@ -7,7 +7,6 @@ package learning
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/brainsrvcfg"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 )
 
@@ -80,25 +78,15 @@ func warnConfigOnce(err error) {
 }
 
 // OpenConfigured opens the store at path (the same argument Open takes) with
-// the backend selected by the environment. With BEACON_MEMORY_BACKEND unset it
-// is exactly Open(path). A present but invalid configuration logs a warning
-// and also returns plain Open(path): a broken backend never breaks the CLI.
+// the backend selected by the environment or the afferent sign-in (see
+// configuredBackend in brainsrv_afferent.go). With neither it is exactly
+// Open(path). A present but invalid configuration logs a warning and also
+// returns plain Open(path): a broken backend never breaks the CLI.
 func OpenConfigured(path string) *Store {
 	store := Open(path)
-	cfg, err := brainsrvcfg.FromEnv()
-	if errors.Is(err, brainsrvcfg.ErrNotConfigured) {
-		return store
+	if b := configuredBackend(path, os.Getenv); b != nil {
+		store.hooks = newBackendHooks(b)
 	}
-	if err != nil {
-		warnConfigOnce(err)
-		return store
-	}
-	key, err := brainsrvcfg.ReadKeyFile(cfg.KeyFile)
-	if err != nil {
-		warnConfigOnce(fmt.Errorf("%s: %w", brainsrvcfg.EnvKeyFile, err))
-		return store
-	}
-	store.hooks = newBackendHooks(NewBrainsrvBackend(path, cfg, key, nil))
 	return store
 }
 

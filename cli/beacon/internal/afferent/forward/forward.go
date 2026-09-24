@@ -194,6 +194,16 @@ func (fw *Forwarder) Run(ctx context.Context) error {
 		fw.saveStatus(true)
 	}()
 	fw.saveStatus(true)
+	// Place the checkpoints now, before waiting for a scope or a login, so a
+	// first run starts at the end of the log as it is when the forwarder
+	// starts; anything written while it waits is delivered later.
+	if err := fw.place(); err != nil {
+		fw.recordError(err)
+		if fw.opts.Once {
+			return err
+		}
+		fw.logf("scan %s: %v", fw.opts.LogPath, err)
+	}
 	if fw.scope == "" {
 		if err := fw.resolveScope(ctx); err != nil || ctx.Err() != nil {
 			return err

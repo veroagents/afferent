@@ -65,9 +65,16 @@ func init() {
 // brainsrvBackendForCmd opens the configured store and returns its brainsrv
 // backend, or explains why there is none.
 func brainsrvBackendForCmd() (*learning.Store, *learning.BrainsrvBackend, error) {
+	// Signed in to afferent (and no key file): the store already routes
+	// through brainsrv with the afferent token.
+	if store := memoryStore(); store != nil {
+		if backend, ok := learning.BrainsrvOf(store); ok {
+			return store, backend, nil
+		}
+	}
 	cfg, err := brainsrvcfg.FromEnv()
 	if errors.Is(err, brainsrvcfg.ErrNotConfigured) {
-		return nil, nil, fmt.Errorf("brainsrv backend not configured: set %s=brainsrv, %s, %s and %s",
+		return nil, nil, fmt.Errorf("brainsrv backend not configured: run `afferent login`, or set %s=brainsrv, %s, %s and %s",
 			brainsrvcfg.EnvBackend, brainsrvcfg.EnvURL, brainsrvcfg.EnvScope, brainsrvcfg.EnvKeyFile)
 	}
 	if err != nil {
@@ -87,6 +94,7 @@ func brainsrvBackendForCmd() (*learning.Store, *learning.BrainsrvBackend, error)
 type memoryBrainsrvStatusResult struct {
 	URL         string                   `json:"url"`
 	Scope       string                   `json:"scope"`
+	Auth        string                   `json:"auth"`
 	StorePath   string                   `json:"store_path"`
 	Reachable   bool                     `json:"reachable"`
 	Error       string                   `json:"error,omitempty"`
@@ -101,7 +109,7 @@ func runMemoryBrainsrvStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	cfg := backend.Config()
-	result := memoryBrainsrvStatusResult{URL: cfg.URL, Scope: cfg.Scope, StorePath: store.Path()}
+	result := memoryBrainsrvStatusResult{URL: cfg.URL, Scope: cfg.Scope, Auth: backend.AuthKind(), StorePath: store.Path()}
 	ctx, cancel := context.WithTimeout(cmdContext(cmd), 10*time.Second)
 	defer cancel()
 	health, herr := backend.Health(ctx)
@@ -132,6 +140,7 @@ func runMemoryBrainsrvStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Fprintf(out, "brainsrv  %s  %s\n", result.URL, reach)
 		fmt.Fprintf(out, "scope     %s\n", result.Scope)
+		fmt.Fprintf(out, "auth      %s\n", result.Auth)
 		fmt.Fprintf(out, "store     %s\n", result.StorePath)
 		if result.Health != nil {
 			fmt.Fprintf(out, "endpoints %d\n", len(result.Health.Endpoints))
