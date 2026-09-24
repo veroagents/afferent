@@ -1,0 +1,173 @@
+# afferent: weekly upstream-drift check (docs/afferent/PLAN.md §4 Phase 0,
+# procedure in docs/afferent/REBASE.md). This file is fork-only; it never
+# exists upstream, so it cannot conflict on rebase.
+#
+# 1. Rebase `brainsrv` onto upstream/main in a scratch branch.
+# 2. Build the embedded hooks binary and run the Go tests.
+# 3. On green: fast-forward origin/main to upstream/main and force-push the
+#    rebased result to `brainsrv-next` for review. `brainsrv` itself is never
+#    pushed by this job.
+# 4. On a conflict or a red build: open or update an `upstream drift: <date>`
+#    issue and fail.
+#
+# Pushing commits that change .github/workflows/** needs a token with the
+# `workflows` scope, which GITHUB_TOKEN never has. Set the optional secret
+# AFFERENT_PUSH_TOKEN (fine-grained PAT: contents + workflows write on this
+# repo) if those pushes get rejected; otherwise GITHUB_TOKEN is used.
+
+name: afferent upstream drift
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: afferent-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/Asymptote-Labs/agent-beacon.git
+  WORK_BRANCH: brainsrv
+  CANDIDATE_BRANCH: brainsrv-next
+  SCRATCH_BRANCH: afferent-rebase-scratch
+  ISSUE_PREFIX: upstream drift
+
+jobs:
+  upstream-drift:
+    if: github.repository == 'veroagents/afferent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: brainsrv
+          fetch-depth: 0
+          token: ${{ secrets.AFFERENT_PUSH_TOKEN || github.token }}
+
+      - name: Configure bot identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+          sha="$(git rev-parse refs/remotes/upstream/main)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream main: $sha"
+          echo "Commits on upstream not yet in $WORK_BRANCH:"
+          git log --oneline "HEAD..refs/remotes/upstream/main" || true
+
+      - name: Rebase brainsrv onto upstream/main
+        id: rebase
+        run: |
+          set -uo pipefail
+          git checkout -B "$SCRATCH_BRANCH" HEAD
+          if git rebase refs/remotes/upstream/main; then
+            echo "Rebase clean: $(git rev-parse HEAD)"
+            exit 0
+          fi
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          git rebase --abort || true
+          {
+            echo 'conflicts<<CONFLICTS_EOF'
+            echo "$conflicts"
+            echo 'CONFLICTS_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "::error::git rebase upstream/main conflicted in:"
+          echo "$conflicts"
+          exit 1
+
+      - uses: ./.github/actions/setup-go
+        with:
+          modules: |
+            cli/beacon
+            cli/beacon-hooks
+            pkg/asymptoteobserve
+
+      # hooks.bin is gitignored and embedded via //go:embed; build the real
+      # platform-matched binary before testing, as ci.yml does.
+      - name: Build platform-matched hooks binary
+        working-directory: cli/beacon
+        run: make build-hooks-current
+
+      - name: Test beacon CLI
+        working-directory: cli/beacon
+        run: go test ./...
+
+      - name: Test observe SDK
+        working-directory: pkg/asymptoteobserve
+        run: go test ./...
+
+      - name: Fast-forward main to upstream
+        id: push_main
+        run: |
+          set -euo pipefail
+          # Non-forced push: GitHub rejects it unless it is a fast-forward.
+          git push origin "refs/remotes/upstream/main:refs/heads/main"
+
+      - name: Push rebased candidate to brainsrv-next
+        id: push_next
+        run: |
+          set -euo pipefail
+          git push --force origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
+          echo "$CANDIDATE_BRANCH -> $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update upstream drift issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          UPSTREAM_SHA: ${{ steps.fetch.outputs.sha }}
+          CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
+          REBASE_OUTCOME: ${{ steps.rebase.outcome }}
+          PUSH_MAIN_OUTCOME: ${{ steps.push_main.outcome }}
+          PUSH_NEXT_OUTCOME: ${{ steps.push_next.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          today="$(date -u +%Y-%m-%d)"
+          if [ "$REBASE_OUTCOME" = "failure" ]; then
+            reason="Rebase of \`$WORK_BRANCH\` onto upstream/main conflicted."
+            files="$(printf '%s\n' "$CONFLICTS" | sed '/^$/d; s/^/- `/; s/$/`/')"
+          elif [ "$PUSH_MAIN_OUTCOME" = "failure" ]; then
+            reason="Fast-forward of \`main\` to upstream/main was rejected (not a fast-forward, or token lacks permission)."
+            files="_n/a_"
+          elif [ "$PUSH_NEXT_OUTCOME" = "failure" ]; then
+            reason="Push to \`$CANDIDATE_BRANCH\` was rejected (see run log; workflow-file changes need AFFERENT_PUSH_TOKEN)."
+            files="_n/a_"
+          else
+            reason="Rebase was clean but the build or tests failed on the rebased tree."
+            files="_none (rebase was clean)_"
+          fi
+          body="$(cat <<EOF
+          ${reason}
+
+          - **Upstream SHA:** \`${UPSTREAM_SHA:-unknown}\`
+          - **Run:** ${RUN_URL}
+
+          **Conflicting files:**
+          ${files:-_none reported_}
+
+          Resolve with the manual procedure in \`docs/afferent/REBASE.md\`.
+          EOF
+          )"
+
+          existing="$(gh issue list --state open --search "\"$ISSUE_PREFIX\" in:title" \
+            --json number,title \
+            --jq "map(select(.title | startswith(\"$ISSUE_PREFIX\"))) | first | .number // empty")"
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$ISSUE_PREFIX: $today" --body "$body"
+            gh issue comment "$existing" --body "Still failing on ${today}: ${reason} (upstream \`${UPSTREAM_SHA:-unknown}\`, ${RUN_URL})"
+            echo "Updated issue #$existing"
+          else
+            gh issue create --title "$ISSUE_PREFIX: $today" --body "$body"
+          fi
