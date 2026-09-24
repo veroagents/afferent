@@ -15,6 +15,7 @@ import (
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/auth"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/config"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/service"
 	beaconauth "github.com/asymptote-labs/agent-beacon/cli/beacon/internal/auth"
 )
 
@@ -28,7 +29,23 @@ type Env struct {
 	HTTP     *http.Client
 	Now      func() time.Time
 	Sleep    func(ctx context.Context, d time.Duration) error
+
+	// ResolveLog finds Beacon's runtime log; nil means the Beacon endpoint
+	// configuration (lifecycle.ResolveRuntimeLog).
+	ResolveLog func(userMode bool) string
+	// Service builds the forwarder service manager; nil means the real
+	// launchd/systemd one.
+	Service func() (service.Manager, error)
+	// Executable is this binary's path, for the service; nil means
+	// os.Executable.
+	Executable func() (string, error)
 }
+
+// commands are added to the root by init() in the command files, so each
+// command group lives in its own file.
+var commands []func(*app) *cobra.Command
+
+func register(f func(*app) *cobra.Command) { commands = append(commands, f) }
 
 // DefaultEnv is the real environment.
 func DefaultEnv() *Env {
@@ -91,6 +108,9 @@ AFFERENT_CONTEXT, then the flags below.`,
 	a.root = root
 
 	root.AddCommand(a.loginCmd(), a.logoutCmd(), a.whoamiCmd(), a.versionCmd())
+	for _, f := range commands {
+		root.AddCommand(f(a))
+	}
 	return root
 }
 

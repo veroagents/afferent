@@ -1,0 +1,14 @@
+[Unit]
+Description=afferent forwarder: Beacon runtime log to brainsrv
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/home/dev/bin/afferent" "forward" "--config-dir" "/home/dev/.config/afferent 100%%" "--x=$$HOME"
+Environment="AFFERENT_STATE_DIR=/Users/dev/state & more $X"
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

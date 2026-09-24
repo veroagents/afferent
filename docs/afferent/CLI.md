@@ -10,6 +10,8 @@ tree and does not reuse Beacon's root command. The code is new files only:
 | `cli/beacon/internal/afferent/config` | `config.json`, env and flag precedence, URL rules |
 | `cli/beacon/internal/afferent/auth` | discovery, device flow, token storage, refresh, revoke |
 | `cli/beacon/internal/afferent/brain` | brainsrv client (`/v1/whoami`) |
+| `cli/beacon/internal/afferent/forward` | the built-in forwarder: tail, checkpoints, batching, delivery, status (D6) |
+| `cli/beacon/internal/afferent/service` | launchd / systemd `--user` unit generation and loading (D6) |
 | `cli/beacon/internal/afferent/afferenttest` | fake authsrv for tests |
 
 ## Build and run
@@ -22,11 +24,15 @@ go build -o afferent ./cmd/afferent
 ./afferent whoami
 ./afferent logout
 ./afferent version
+./afferent forward --once --backfill   # send the runtime log once, from the oldest archive
+./afferent service install             # run `afferent forward` in the background
+./afferent status
 ```
 
 Tests: `go test ./internal/afferent/...`. They use an in-process fake authsrv and
-brainsrv, a fake `security` tool, and temp directories. They never touch the
-real Keychain.
+brainsrv, a fake `security` tool, a fake service loader, and temp
+directories. They never touch the real Keychain, `~/.beacon`, launchd or
+systemd.
 
 The Makefile and `.goreleaser.yaml` are upstream files and do not build
 `afferent`. Packaging comes in D8, through `.goreleaser.afferent.yaml`.
@@ -50,6 +56,8 @@ The directory is 0700 and the file 0600. Later sources win:
    - `AFFERENT_TOKEN_ENDPOINT`
    - `AFFERENT_BRAINSRV_URL`
    - `AFFERENT_CONTEXT`
+   - `AFFERENT_SCOPE`: the forwarder's X-Scope. It is usually left unset, and
+     then learned from brainsrv (see below).
 4. Flags:
    - `--issuer`
    - `--issuer-dial`
@@ -57,6 +65,9 @@ The directory is 0700 and the file 0600. Later sources win:
    - `--brainsrv-url`
    - `--context`
    - `--config-dir`
+
+The forwarder keeps its state in `<config dir>/state`, a 0700 directory.
+`AFFERENT_STATE_DIR` overrides the location.
 
 A successful `login` writes the settings it used to `config.json`. Later
 commands then find the same credentials without repeating the flags.
@@ -196,3 +207,140 @@ discovery `revocation_endpoint`, with `token_type_hint=refresh_token` and
 
 Until D2 lands, authsrv's `/oauth2/revoke` does not know device-flow refresh
 handles. The call still succeeds, but it has no effect on the server.
+
+## forward (D6)
+
+`afferent forward` replaces the Vector forwarder. It tails Beacon's runtime log
+and posts it to `POST <brainsrv>/v1/ingest/beacon/runtime`. Each request has:
+- `Authorization: Bearer <access token>`
+- `X-Context`
+- `X-Scope`
+- `Content-Type: application/x-ndjson`
+- `Content-Encoding: gzip`
+
+It runs in the foreground until interrupted.
+
+```
+afferent forward [--backfill] [--once] [--scope S] [--log-path P | --system] [--flush-interval 5s]
+```
+
+- **Which log.** The log comes from the Beacon endpoint configuration, the same
+  way `beacon memory` finds it: the per-user log by default, or the system
+  log with `--system`. `--log-path` names a file directly. The forwarder reads
+  `runtime.jsonl` and the archives Beacon rotates it into (`.1` to `.5` at
+  10 MiB).
+- **Where it starts.**
+  - The first run starts at the end of the live log, at a line boundary.
+  - `--backfill` starts from the oldest retained archive. brainsrv dedupes on
+    `event.id`, so history it already has comes back as `duplicate`.
+- **Checkpoints.** The forwarder keeps one checkpoint per file identity (device
+  and inode). Each holds a byte offset and a hash of the file's first 1 KiB.
+  They live in `state/checkpoints.json` (0600), written atomically, and move
+  **only after brainsrv answers 200** for the batch that held those bytes.
+  - A restart resumes exactly where brainsrv last acknowledged.
+  - A crash between the 200 and the checkpoint write re-sends one batch.
+    brainsrv's dedupe makes that harmless.
+  - **Rotation:** the files are read oldest first. When the live file's inode
+    changes, the old inode (now `.1`) is read to its end, then the new live
+    file from 0.
+  - **Truncation:** a file smaller than its offset is read again from 0, and
+    a line is logged. So is a file whose first bytes changed, for example a
+    reused inode.
+  - **Partial lines:** a line is sent only once its newline is written.
+  - A file that rotates past `.5` before it was delivered is logged with the
+    number of bytes lost.
+- **Batches.** A batch is sent at 5,000 lines, at 4 MiB uncompressed, or 5
+  seconds (`--flush-interval`) after data first waits. It is gzipped.
+  - A line over 1 MiB is skipped, counted and logged. It is not allowed to
+    block the log.
+- **Responses.** Nothing is dropped on an error; the batch is retried until
+  brainsrv takes it.
+
+  | brainsrv answer | forwarder |
+  |---|---|
+  | 200 | advance the checkpoints |
+  | 401 | force one token refresh (`TokenSource.ForceRefresh`) and retry once. If the session is gone (`invalid_grant`, signed out), pause with **login required** and retry every minute. After `afferent login` it carries on. |
+  | 403 | ask `/v1/whoami` for the scope again, and switch if it changed. Otherwise pause with **scope denied**. |
+  | 413 | split the batch in half and send each half. A single line that still gets 413 is skipped and counted. |
+  | other 4xx | log it, record it (with a body snippet) in the status file, back off, retry |
+  | 5xx, network | exponential backoff with jitter (1 s doubling, capped at 5 min) |
+
+  Cancelling (Ctrl-C, SIGTERM) stops cleanly. The status says `stopped`.
+- **One at a time.** An exclusive `flock` on `state/forward.lock` allows one
+  forwarder per state directory. A second one exits with "already running".
+- `--once` sends what is in the log now, then exits. Any failure is returned
+  instead of retried, which suits tests and CI.
+
+### The scope (X-Scope)
+
+X-Scope is the member base scope. By default the forwarder asks brainsrv
+`GET /v1/whoami` and takes the one grant whose scope ends in `.harness` and
+includes `write`. With the D3 template, that is
+`ws.<tenant>.people.<sub>.harness`.
+- No such grant is an error that names the Context. So is more than one,
+  which lists the scopes found.
+- The answer is cached in `state/scope.json`. The cache is used when brainsrv
+  cannot be reached or you are signed out, never over a definite answer.
+- A service started before `afferent login` pauses with "login required"
+  until you sign in.
+- `--scope`, `AFFERENT_SCOPE` or `"scope"` in `config.json` set it by hand.
+  brainsrv still enforces the grant.
+
+### Status file
+
+`state/status.json` holds:
+- the pid and the state (`running`, `paused`, `backoff`, `stopped`)
+- the paused reason
+- the last success
+- the last error, with the time
+- the next retry
+- the totals: batches, lines and bytes sent; accepted, duplicate and rejected
+  from brainsrv; lines skipped
+- the lag: bytes behind, per retained file and in total
+
+## service (D6)
+
+```
+afferent service install [--log-path P | --system] [--program PATH]
+afferent service uninstall
+afferent service status
+```
+
+- **macOS:** a LaunchAgent `com.veroagents.afferent.forwarder` in
+  `~/Library/LaunchAgents/`.
+  - It is loaded with `launchctl bootstrap gui/<uid>`, after a `bootout` of
+    any earlier copy.
+  - It is resident (`RunAtLoad`, `KeepAlive`, 10 s throttle).
+  - Its stdout and stderr go to `state/forwarder.log`, in the 0700 state
+    directory, not `/tmp`.
+- **Linux:** a systemd `--user` unit `afferent-forwarder.service` in
+  `~/.config/systemd/user/`.
+  - It is loaded with `daemon-reload`, `enable` and `restart`.
+  - `Restart=always`. Its logs go to the journal:
+    `journalctl --user -u afferent-forwarder.service`.
+- The job runs `<this binary> forward --config-dir <dir>`. `--program`
+  overrides the binary, for example the stable Homebrew path
+  `/opt/homebrew/bin/afferent` instead of a versioned Cellar path.
+- `install` saves the current settings to `config.json`, so the service uses
+  the same issuer, brainsrv and Context as the shell that installed it. It
+  warns if you are not signed in.
+- `uninstall` stops the job and removes the unit. It keeps the checkpoints,
+  so a later install resumes where it stopped.
+
+Unit generation is pure (`service.Plist`, `service.SystemdUnitFile`, golden
+files in `internal/afferent/service/testdata`). Load, unload and status go
+through a `Loader`. The real `Launchctl` and `Systemctl` loaders run their
+commands through a `Runner`, so tests check the exact commands without running
+them.
+
+## status
+
+`afferent status` shows, in one place:
+- **sign-in:** who you are, the issuer, and how long the token is valid. It
+  refreshes the token if needed.
+- **brainsrv:** the URL and Context, the principal, and the scope the
+  forwarder would use (configured, from `/v1/whoami`, or cached).
+- **service:** installed or not, running, and the pid.
+- **forwarder:** the status file: state and paused reason, when it was last
+  updated, the log path, the last success, the last error, the totals, and
+  the lag per file.

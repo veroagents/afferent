@@ -141,7 +141,10 @@ is a review failure:**
 | `cmd/memory.go` | `memoryStore()` → `learning.OpenConfigured(logPath)` |
 | `internal/mcpserver/server.go` | `memoryStore()` → `OpenConfigured`; `registerBrainsrvTools()` call in `registerTools`; `degraded`/`history` fields on 2 result structs; `include_history` in 2 input schemas |
 | `internal/endpoint/dashboard/memory.go` | `learning.Open` → `learning.OpenConfigured` |
-| `internal/endpoint/service/forwarder.go` | optional `LaunchdLabel`/`SystemdUnit`/`Description` on `ForwarderManager` (every `ForwarderLabel`/`ForwarderSystemdUnit` use becomes a defaulting accessor) |
+
+`internal/endpoint/service/forwarder.go` is no longer edited. The Vector
+forwarder that needed it was replaced by `afferent forward` (PLAN D6), and the
+file was reverted to upstream.
 
 A quick check a reviewer can run. Every path it prints must be a new file
 (`A`) or appear in the table above:
@@ -154,6 +157,6 @@ git diff --name-status upstream/main...brainsrv | grep -v '^A'
 
 - PLAN.md was verified against upstream `c03b02f`. Upstream `main` has since
   moved to `5303224c` (10 commits). None of those commits touch the planned
-  touch points: the five files above, `cli/beacon/cmd/endpoint.go` or
+  touch points: the files above (then five, including `forwarder.go`), `cli/beacon/cmd/endpoint.go` or
   `cli/beacon/go.mod` (`git diff --stat c03b02f 5303224c -- <paths>` is
   empty).

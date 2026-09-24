@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.veroagents.afferent.forwarder</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/afferent</string>
+    <string>forward</string>
+    <string>--config-dir</string>
+    <string>/Users/dev/.config/afferent</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AFFERENT_STATE_DIR</key>
+    <string>/Users/dev/state &amp; more $X</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/dev/.config/afferent/state/forwarder.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/dev/.config/afferent/state/forwarder.log</string>
+</dict>
+</plist>

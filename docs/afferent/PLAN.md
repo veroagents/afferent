@@ -39,7 +39,8 @@ No key files, no scopes, no URLs, no Vector.
    `afferent` binary:
    - It keeps a checkpoint per file, by inode, across Beacon's
      `.1`–`.5` rotation.
-   - It batches ≤5,000 lines, gzips, retries on 5xx and drops on 4xx.
+   - It batches ≤5,000 lines, gzips, and retries every failure (it never
+     drops a batch; see D6 below).
    - At-least-once delivery is safe because brainsrv dedupes on `event.id`.
    - It refreshes its own access tokens. Vector cannot do that, which is why
      Vector goes.
@@ -78,7 +79,7 @@ agents ──────────── authsrv token ───────�
 | D3 | brainsrv | Grant-template substitution: `scope_path` may contain `{sub}` and `{tenant_id}`, sanitized to ltree labels with the shared label rules. Example template: any user token ⇒ `ws.{tenant_id}.people.{sub}.harness` with read+write+forget. Plus the afferent Context's `auth_config` (issuer, JWKS, `aud=brainsrv`, autoprovision). |
 | D4 | brainsrv | Beacon ingest and `/mcp` accept the JWT path. Verify that X-Scope is optional for JWTs and defaults to the member scope, or keep it required and have the CLI send the templated scope it learns at login. |
 | D5 | afferent | Scaffold `cmd/afferent` with `login` / `logout` / `whoami`: device flow, refresh token in the macOS Keychain (file fallback 0600 elsewhere), auto-refresh. |
-| D6 | afferent | Built-in forwarder: `afferent forward` running as a launchd/systemd service, with checkpoints, rotation, batching and gzip. It reuses the Phase 5 tests (delivery, restart, backfill duplicates, brainsrv down). Delete the Vector pack. |
+| D6 | afferent | Built-in forwarder: `afferent forward` running as a launchd/systemd service, with checkpoints, rotation, batching and gzip. It reuses the Phase 5 tests (delivery, restart, backfill duplicates, brainsrv down). Delete the Vector pack. **Built; live test pending (see D6 status below).** |
 | D7 | afferent | `afferent setup` (capture install + login + forwarder), `afferent mcp config` (writes the brainsrv `/mcp` entry for Claude Code, Cursor and Codex), `afferent sync` (history backfill via the harness readers). The memory write-through uses the same token. |
 | D8 | afferent | Packaging: a Homebrew `afferent` formula with no Vector dependency. |
 
@@ -145,6 +146,64 @@ Results:
   27" because it reads `027_seed.example.sql` as a migration. Move that file
   out of `migrations/`.
 
+**D6 status (2026-09-24): built, tested against fakes; live test pending.**
+The user was signed out by the reuse-detection test above, so the live run
+against vero-local is still open. What exists:
+- `internal/afferent/forward`: the tailer and sender.
+  - One checkpoint per file identity (device and inode), with a byte offset
+    and a fingerprint of the first 1 KiB. It is written atomically (0600) to
+    `<config dir>/state/checkpoints.json` (`AFFERENT_STATE_DIR` overrides),
+    and only after a 200 for the batch that held those bytes.
+  - Files are read oldest first (`.5` … `.1`, live). After a rotation the old
+    inode (now `.1`) is finished before the new live file is read from 0.
+    - A file smaller than its offset (truncated), or whose first bytes
+      changed (replaced), is read again from 0, with a log line.
+    - A line without its newline is never sent.
+    - A first run starts at the end of the live file, at a line boundary.
+      `--backfill` starts from the oldest archive.
+  - Batches flush at 5,000 lines, at 4 MiB uncompressed, or 5 s after data
+    first waits. They are gzipped.
+  - A line over 1 MiB is skipped and counted. So is a single line that
+    brainsrv refuses with 413.
+  - Responses:
+    - 200: advance the checkpoints.
+    - 401: force one token refresh and retry. If a login is needed, pause
+      with "login required" and retry every minute.
+    - 403: ask `/v1/whoami` for the scope again. If it is the same, pause
+      with "scope denied".
+    - 413: split the batch in half and retry each half.
+    - Any other 4xx: back off and keep the batch. The body goes in the
+      status file.
+    - 5xx or network: exponential backoff with jitter, capped at 5 min.
+  - Nothing is ever dropped on an error. A single `flock` on
+    `state/forward.lock` allows one forwarder per state directory.
+  - `status.json` holds the state, the paused reason, the last success, the
+    last error, the counters, and the lag per file.
+- X-Scope is the single `/v1/whoami` grant that ends in `.harness` and has
+  `write`. It is cached in `state/scope.json`, used when brainsrv is
+  unreachable or the user is signed out.
+  - `--scope`, `AFFERENT_SCOPE` or config `scope` override it.
+  - No such grant, or more than one, is a clear error.
+- `auth.TokenSource.ForceRefresh(rejected)` is new. It refreshes a token that
+  a server rejected, unless another process already did.
+- Commands: `afferent forward [--backfill] [--once]`,
+  `afferent service install|uninstall|status`, and `afferent status`.
+  - The service is launchd `com.veroagents.afferent.forwarder`, logging to
+    `state/forwarder.log`, or systemd `--user` `afferent-forwarder.service`.
+  - Unit generation is pure. Load, unload and status go through a `Loader`,
+    and tests use fakes: they never run `launchctl` or `systemctl`.
+- The Vector forwarder is gone:
+  - `internal/endpoint/brainsrv/` is deleted.
+  - `cmd/endpoint_brainsrv*.go` is deleted, including the uninstall wrapper.
+  - `internal/endpoint/service/forwarder.go` is **reverted to upstream**, so
+    the fork no longer edits it.
+  - The Phase 2 memory backend (`internal/learning` brainsrv backend,
+    `brainsrvcfg`) stays until D7 moves it to the authsrv token.
+- **Next, live on vero-local:** `afferent login`, `afferent forward --once
+  --backfill` (expect all duplicates for history already sent with this
+  principal), `afferent service install`, then `afferent status`. Also force
+  an expired token under the running service.
+
 **Test plan:** each step is tested live on vero-local with a real browser
 approval. The first test is D1 + D5: device login as `drew@vero.localhost`,
 decode the claims, and call brainsrv with the JWT.
@@ -179,7 +238,7 @@ decode the claims, and call brainsrv with the JWT.
 | B-3 | `memory_sync` is "a new table" | The schema is gated by `PRAGMA user_version` (`storeSchemaVersion = 1`). Bumping it is an upstream edit that will collide the day upstream bumps to 2. | Create `memory_sync` with `CREATE TABLE IF NOT EXISTS` in our own `ensureSyncSchema()` (in `brainsrv.go`). **Do not touch `user_version`.** |
 | B-4 | `Store` gets an optional backend "additively" | `Store` is concrete and passed as `*Store` everywhere. Write-through needs hooks inside `PutMemory`, `ListMemories` and `GetMemory`. | **One hook seam.** Add one field `hooks StoreHooks` (an interface with `AfterPut`, `Search`, `GetMissing`), and each method gets a single line that calls through it. All logic lives in new files. The 3 call lines can't be avoided while `Store` is concrete, but a conflict now needs upstream to touch that exact line in that method. Listed in §4. |
 | B-5 | The subcommand is registered with "one line in `cmd/endpoint.go`" | Asymptote is a table entry in `siemDestinations`, and `endpointCmd` is a package var. | **Zero edits.** `cmd/endpoint_brainsrv.go` calls `endpointCmd.AddCommand(...)` in its own `init()`. `cmd/memory_brainsrv.go` does the same for `memoryCmd`. |
-| B-6 | The forwarder installs `com.afferent.brainsrv-forwarder` | `service.ForwarderManager` hard-codes `ForwarderLabel` and `ForwarderSystemdUnit`. | Small upstream edit: optional `Label`, `SystemdUnit` and `Description` fields on `ForwarderManager`. Zero values fall back to the existing constants. |
+| B-6 | The forwarder installs `com.afferent.brainsrv-forwarder` | `service.ForwarderManager` hard-codes `ForwarderLabel` and `ForwarderSystemdUnit`. | Small upstream edit: optional `Label`, `SystemdUnit` and `Description` fields on `ForwarderManager`. Zero values fall back to the existing constants. **Reverted by D6:** the built-in forwarder has its own service code, so `forwarder.go` is upstream again. |
 | B-7 | MCP results can carry `degraded` / `history` | `search_memory` and `get_memory_context` have result structs. `get_memory` returns a bare `LearningMemoryV1`. | Add `degraded,omitempty` and `history,omitempty` fields to the two structs. Leave **`get_memory` unchanged** (it reads local first, so it never degrades). |
 | B-8 | 0600 key-file check "following Beacon's pattern" | No such helper exists. `ReadDeviceKey` doesn't check permissions. | New `brainsrvcfg.ReadKeyFile`: `Lstat`, reject symlinks, require `uid == Getuid`, require `perm & 0o077 == 0`. |
 | B-9 | Session key falls back to `run.provider:run.id` | The field is `run.run_id`. | Use `run.provider + ":" + run.run_id`. |
@@ -558,7 +617,10 @@ failure:**
 | `cmd/memory.go` | `memoryStore()` → `learning.OpenConfigured(logPath)` |
 | `internal/mcpserver/server.go` | `memoryStore()` → `OpenConfigured`; `registerBrainsrvTools()` call in `registerTools`; `degraded`/`history` fields on 2 result structs; `include_history` in 2 input schemas |
 | `internal/endpoint/dashboard/memory.go` | `learning.Open` → `learning.OpenConfigured` |
-| `internal/endpoint/service/forwarder.go` | optional `LaunchdLabel`/`SystemdUnit`/`Description` on `ForwarderManager` (every `ForwarderLabel`/`ForwarderSystemdUnit` use becomes a defaulting accessor) |
+
+`internal/endpoint/service/forwarder.go` was edited for the Vector forwarder
+(Phase 5, B-6). D6 replaced that forwarder and reverted the file to upstream,
+so it is no longer an allowed edit.
 
 ### Phase 2 — B1 memory backend
 
@@ -697,6 +759,11 @@ reading and the label sanitizer, and is shared with B3.
 
 
 ### Phase 5 — B3 forwarder
+
+> **Superseded by D6 (★).** The Vector-based forwarder below was built and
+> tested, then deleted when the built-in `afferent forward` replaced it. The
+> notes stay as a record.
+
 New package `internal/endpoint/brainsrv/`, cloned from `asymptote/` without
 enrollment, account, reconnect or privacy transforms. Keep the
 `# BEACON_PRIVACY_TRANSFORMS` marker as the future hook.
@@ -858,3 +925,6 @@ Run on the dev-local stack. `docker compose up`, then
   MCP for reads.
 - Recorded the authsrv refresh-token blocker, the grant-template substitution
   gap, and the D1–D8 work list.
+- D6: the built-in forwarder replaced Vector. The Vector pack and
+  `beacon endpoint brainsrv` are deleted, and `internal/endpoint/service/forwarder.go`
+  is back to upstream (§4 table).

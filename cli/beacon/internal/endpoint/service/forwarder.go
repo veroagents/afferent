@@ -24,26 +24,6 @@ type ForwarderManager struct {
 	UserMode bool
 	// Kind selects the backend; the zero value auto-detects.
 	Kind Kind
-	// LaunchdLabel, SystemdUnit and Description name a second forwarder (afferent's brainsrv
-	// forwarder). Zero values keep ForwarderLabel, ForwarderSystemdUnit and the Asymptote
-	// description. The label field cannot be called Label: that is the method below.
-	LaunchdLabel string
-	SystemdUnit  string
-	Description  string
-}
-
-func (m ForwarderManager) launchdLabel() string {
-	if m.LaunchdLabel != "" {
-		return m.LaunchdLabel
-	}
-	return ForwarderLabel
-}
-
-func (m ForwarderManager) systemdUnit() string {
-	if m.SystemdUnit != "" {
-		return m.SystemdUnit
-	}
-	return ForwarderSystemdUnit
 }
 
 func (m ForwarderManager) resolvedKind() Kind {
@@ -84,9 +64,9 @@ func (m ForwarderManager) UnsupportedReason() string {
 // Label is the service identifier for status output.
 func (m ForwarderManager) Label() string {
 	if m.resolvedKind() == KindSystemd {
-		return m.systemdUnit()
+		return ForwarderSystemdUnit
 	}
-	return m.launchdLabel()
+	return ForwarderLabel
 }
 
 // UnitPath returns where the forwarder's service definition lives.
@@ -98,18 +78,18 @@ func (m ForwarderManager) UnitPath() (string, error) {
 			if err != nil {
 				return "", err
 			}
-			return filepath.Join(home, ".config", "systemd", "user", m.systemdUnit()), nil
+			return filepath.Join(home, ".config", "systemd", "user", ForwarderSystemdUnit), nil
 		}
-		return filepath.Join("/etc/systemd/system", m.systemdUnit()), nil
+		return filepath.Join("/etc/systemd/system", ForwarderSystemdUnit), nil
 	default:
 		if m.UserMode {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				return "", err
 			}
-			return filepath.Join(home, "Library", "LaunchAgents", m.launchdLabel()+".plist"), nil
+			return filepath.Join(home, "Library", "LaunchAgents", ForwarderLabel+".plist"), nil
 		}
-		return filepath.Join("/Library/LaunchDaemons", m.launchdLabel()+".plist"), nil
+		return filepath.Join("/Library/LaunchDaemons", ForwarderLabel+".plist"), nil
 	}
 }
 
@@ -134,9 +114,9 @@ func (m ForwarderManager) WriteUnit(vectorBin, configPath string) (string, error
 	}
 	var content string
 	if m.resolvedKind() == KindSystemd {
-		content = describedForwarderUnitFile(m.Description, vectorBin, configPath, m.UserMode)
+		content = forwarderUnitFile(vectorBin, configPath, m.UserMode)
 	} else {
-		content = forwarderPlist(m.launchdLabel(), vectorBin, configPath)
+		content = forwarderPlist(ForwarderLabel, vectorBin, configPath)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", err
@@ -156,11 +136,11 @@ func (m ForwarderManager) Load() error {
 		return fmt.Errorf("%s", m.UnsupportedReason())
 	}
 	if m.resolvedKind() == KindSystemd {
-		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "enable", "--now", m.systemdUnit())...); err != nil {
-			return systemctlError(out, err, "enable --now "+m.systemdUnit())
+		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "enable", "--now", ForwarderSystemdUnit)...); err != nil {
+			return systemctlError(out, err, "enable --now "+ForwarderSystemdUnit)
 		}
-		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "restart", m.systemdUnit())...); err != nil {
-			return systemctlError(out, err, "restart "+m.systemdUnit())
+		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "restart", ForwarderSystemdUnit)...); err != nil {
+			return systemctlError(out, err, "restart "+ForwarderSystemdUnit)
 		}
 		return nil
 	}
@@ -169,19 +149,19 @@ func (m ForwarderManager) Load() error {
 		return err
 	}
 	domain := serviceDomain(m.UserMode)
-	target := domain + "/" + m.launchdLabel()
+	target := domain + "/" + ForwarderLabel
 	// bootout first so a config rewrite (re-enrollment rotates the key) restarts Vector, then
 	// wait for the old instance to be gone: it drains in-flight requests for up to a minute,
 	// and a bootstrap issued while it is still registered is silently lost with it. Finally
 	// confirm the new instance is actually running rather than trusting the old pid.
-	_ = runLaunchctlWithContext(domain, m.launchdLabel(), "", "bootout", target)
-	if !waitForLaunchdJobGone(domain, m.launchdLabel()) {
+	_ = runLaunchctlWithContext(domain, ForwarderLabel, "", "bootout", target)
+	if !waitForLaunchdJobGone(domain, ForwarderLabel) {
 		return fmt.Errorf("the previous forwarder did not stop within %s; check `launchctl print %s`", launchdStopTimeout, target)
 	}
-	if err := loadLaunchdJob(domain, m.launchdLabel(), path); err != nil {
+	if err := loadLaunchdJob(domain, ForwarderLabel, path); err != nil {
 		return err
 	}
-	if !waitForLaunchdJobRunning(domain, m.launchdLabel()) {
+	if !waitForLaunchdJobRunning(domain, ForwarderLabel) {
 		return fmt.Errorf("the forwarder was loaded but has not started within %s; check `launchctl print %s` and Vector's log", launchdStartTimeout, target)
 	}
 	return nil
@@ -194,18 +174,18 @@ func (m ForwarderManager) Unload() error {
 		if !systemdIsInit() {
 			return nil
 		}
-		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "stop", m.systemdUnit())...); err != nil && !systemdUnitMissing(out) {
-			return systemctlError(out, err, "stop "+m.systemdUnit())
+		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "stop", ForwarderSystemdUnit)...); err != nil && !systemdUnitMissing(out) {
+			return systemctlError(out, err, "stop "+ForwarderSystemdUnit)
 		}
-		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "disable", m.systemdUnit())...); err != nil && !systemdUnitMissing(out) {
-			return systemctlError(out, err, "disable "+m.systemdUnit())
+		if out, err := runSystemctlCommand(systemctlArgs(m.UserMode, "disable", ForwarderSystemdUnit)...); err != nil && !systemdUnitMissing(out) {
+			return systemctlError(out, err, "disable "+ForwarderSystemdUnit)
 		}
 		return nil
 	case KindLaunchd:
 		if runtime.GOOS != "darwin" {
 			return nil
 		}
-		return bootoutLaunchdJob(serviceDomain(m.UserMode), m.launchdLabel())
+		return bootoutLaunchdJob(serviceDomain(m.UserMode), ForwarderLabel)
 	default:
 		return nil
 	}
@@ -218,13 +198,13 @@ func (m ForwarderManager) Status() Status {
 		return Status{Label: m.Label(), Kind: string(kind), Message: m.UnsupportedReason()}
 	}
 	if kind == KindSystemd {
-		status := Status{Label: m.systemdUnit(), Kind: string(KindSystemd)}
-		enabledOut, _ := runSystemctlCommand(systemctlArgs(m.UserMode, "is-enabled", m.systemdUnit())...)
+		status := Status{Label: ForwarderSystemdUnit, Kind: string(KindSystemd)}
+		enabledOut, _ := runSystemctlCommand(systemctlArgs(m.UserMode, "is-enabled", ForwarderSystemdUnit)...)
 		switch strings.TrimSpace(enabledOut) {
 		case "enabled", "enabled-runtime", "static":
 			status.Loaded = true
 		}
-		activeOut, _ := runSystemctlCommand(systemctlArgs(m.UserMode, "is-active", m.systemdUnit())...)
+		activeOut, _ := runSystemctlCommand(systemctlArgs(m.UserMode, "is-active", ForwarderSystemdUnit)...)
 		status.Running = strings.TrimSpace(activeOut) == "active"
 		if status.Running {
 			status.Loaded = true
@@ -234,8 +214,8 @@ func (m ForwarderManager) Status() Status {
 		}
 		return status
 	}
-	status := Status{Label: m.launchdLabel(), Kind: string(KindLaunchd)}
-	out, err := runLaunchctlCommand("print", serviceDomain(m.UserMode)+"/"+m.launchdLabel())
+	status := Status{Label: ForwarderLabel, Kind: string(KindLaunchd)}
+	out, err := runLaunchctlCommand("print", serviceDomain(m.UserMode)+"/"+ForwarderLabel)
 	if err != nil {
 		status.Message = strings.TrimSpace(out)
 		return status
@@ -248,20 +228,10 @@ func (m ForwarderManager) Status() Status {
 // forwarderUnitFile renders the systemd unit. Vector reads its own config, so the unit needs no
 // environment; the rendered vector.toml carries literal paths and URLs.
 func forwarderUnitFile(vectorBin, configPath string, userMode bool) string {
-	return describedForwarderUnitFile("", vectorBin, configPath, userMode)
-}
-
-// describedForwarderUnitFile is forwarderUnitFile with an optional Description; a non-empty one
-// also drops the Asymptote Documentation link.
-func describedForwarderUnitFile(description, vectorBin, configPath string, userMode bool) string {
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
-	if description != "" {
-		fmt.Fprintf(&b, "Description=%s\n", description)
-	} else {
-		b.WriteString("Description=Beacon endpoint forwarder to Asymptote managed ingest\n")
-		b.WriteString("Documentation=https://docs.asymptotelabs.ai/cli/endpoint-connect\n")
-	}
+	b.WriteString("Description=Beacon endpoint forwarder to Asymptote managed ingest\n")
+	b.WriteString("Documentation=https://docs.asymptotelabs.ai/cli/endpoint-connect\n")
 	b.WriteString("After=network-online.target\n")
 	b.WriteString("Wants=network-online.target\n")
 	b.WriteString("\n[Service]\n")

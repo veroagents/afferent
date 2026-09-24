@@ -36,6 +36,8 @@ const (
 	EnvTokenEndpoint = "AFFERENT_TOKEN_ENDPOINT"
 	EnvBrainsrvURL   = "AFFERENT_BRAINSRV_URL"
 	EnvContext       = "AFFERENT_CONTEXT"
+	EnvScope         = "AFFERENT_SCOPE"
+	EnvStateDir      = "AFFERENT_STATE_DIR"
 )
 
 // Config is the on-disk shape of config.json.
@@ -58,6 +60,10 @@ type Config struct {
 	BrainsrvURL string `json:"brainsrv_url"`
 	// Context is the brainsrv Context slug sent as X-Context.
 	Context string `json:"context"`
+	// Scope, when set, is the member base scope the forwarder sends as
+	// X-Scope. Empty means learn it from brainsrv /v1/whoami (the single
+	// writable grant ending in ".harness").
+	Scope string `json:"scope,omitempty"`
 }
 
 // Defaults returns the built-in local-dev configuration.
@@ -83,6 +89,18 @@ func Dir() (string, error) {
 		return "", fmt.Errorf("locate home directory: %w", err)
 	}
 	return filepath.Join(home, ".config", "afferent"), nil
+}
+
+// StateDir returns where the forwarder keeps its checkpoints, status and
+// logs: $AFFERENT_STATE_DIR if set, else <config dir>/state.
+func StateDir(configDir string, getenv func(string) string) string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if d := strings.TrimSpace(getenv(EnvStateDir)); d != "" {
+		return d
+	}
+	return filepath.Join(configDir, "state")
 }
 
 // Path returns the config.json path inside dir.
@@ -119,6 +137,7 @@ func (c *Config) ApplyEnv(getenv func(string) string) {
 		TokenEndpoint: getenv(EnvTokenEndpoint),
 		BrainsrvURL:   getenv(EnvBrainsrvURL),
 		Context:       getenv(EnvContext),
+		Scope:         getenv(EnvScope),
 	})
 }
 
@@ -135,6 +154,7 @@ func (c *Config) merge(o Config) {
 	set(&c.TokenEndpoint, o.TokenEndpoint)
 	set(&c.BrainsrvURL, o.BrainsrvURL)
 	set(&c.Context, o.Context)
+	set(&c.Scope, o.Scope)
 }
 
 // Normalize trims trailing slashes from the URLs.

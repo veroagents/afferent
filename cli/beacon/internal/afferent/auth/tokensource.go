@@ -82,6 +82,29 @@ func (ts *TokenSource) Token(ctx context.Context) (string, error) {
 // Credentials returns credentials whose access token is valid for at least
 // Skew, refreshing if needed.
 func (ts *TokenSource) Credentials(ctx context.Context) (*Credentials, error) {
+	return ts.credentials(ctx, "")
+}
+
+// ForceRefresh returns a new access token after a server rejected rejected
+// (a 401 on a token that still looked valid, for example after the issuer
+// rotated keys or revoked it). If the stored token is already a different
+// one, because another process refreshed in the meantime, that one is
+// returned without another refresh.
+func (ts *TokenSource) ForceRefresh(ctx context.Context, rejected string) (string, error) {
+	c, err := ts.credentials(ctx, rejected)
+	if err != nil {
+		return "", err
+	}
+	return c.AccessToken, nil
+}
+
+// usable reports whether c can be handed out: valid for Skew and not the
+// token a server just rejected.
+func (ts *TokenSource) usable(c *Credentials, rejected string) bool {
+	return c.ValidFor(ts.now(), ts.skew()) && (rejected == "" || c.AccessToken != rejected)
+}
+
+func (ts *TokenSource) credentials(ctx context.Context, rejected string) (*Credentials, error) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
@@ -92,7 +115,7 @@ func (ts *TokenSource) Credentials(ctx context.Context) (*Credentials, error) {
 	if err := ts.checkOwner(ctx, c); err != nil {
 		return nil, err
 	}
-	if c.ValidFor(ts.now(), ts.skew()) {
+	if ts.usable(c, rejected) {
 		return c, nil
 	}
 	if err := config.EnsureDir(filepath.Dir(ts.LockPath)); err != nil {
@@ -109,7 +132,7 @@ func (ts *TokenSource) Credentials(ctx context.Context) (*Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c.ValidFor(ts.now(), ts.skew()) {
+	if ts.usable(c, rejected) {
 		return c, nil
 	}
 	if c.RefreshToken == "" {

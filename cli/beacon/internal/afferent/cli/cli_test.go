@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/afferenttest"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/auth"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/config"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/afferent/service"
 )
 
 type harness struct {
@@ -23,6 +25,11 @@ type harness struct {
 	opened  []string
 	envs    map[string]string
 	whoami  http.HandlerFunc
+	ingest  http.HandlerFunc
+	// logPath stands in for Beacon's runtime log; svc for launchd/systemd.
+	logPath string
+	svc     *fakeLoader
+	home    string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -35,7 +42,16 @@ func newHarness(t *testing.T) *harness {
 		w.Write([]byte(`{"principal_id":"p-1","kind":"user","context":"afferent-poc","subject":"user-1",
 			"grants":[{"scope":"ws.dev.people.drew.harness","verbs":["read","write","forget"],"template_id":"member"}]}`))
 	}
-	h.brain = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.whoami(w, r) }))
+	h.brain = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/ingest/beacon/runtime" && h.ingest != nil {
+			h.ingest(w, r)
+			return
+		}
+		h.whoami(w, r)
+	}))
+	h.logPath = filepath.Join(t.TempDir(), "runtime.jsonl")
+	h.svc = &fakeLoader{}
+	h.home = t.TempDir()
 	t.Cleanup(h.brain.Close)
 	h.envs = map[string]string{
 		config.EnvConfigDir:   h.dir,
@@ -58,6 +74,12 @@ func (h *harness) run(args ...string) (string, string, error) {
 			return &auth.FileStore{Path: auth.CredentialsFile(dir)}
 		},
 		Sleep: clk.Sleep,
+		// Never the real Beacon config, launchd/systemd or binary path.
+		ResolveLog: func(bool) string { return h.logPath },
+		Service: func() (service.Manager, error) {
+			return service.Manager{Kind: service.KindLaunchd, Home: h.home, Loader: h.svc}, nil
+		},
+		Executable: func() (string, error) { return "/usr/local/bin/afferent", nil },
 	}
 	root := NewRootCmd(env)
 	root.SetArgs(args)
