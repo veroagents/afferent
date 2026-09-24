@@ -20,7 +20,9 @@ That's it. `setup` walks through six steps and asks before each change:
 6. **sync**: offers to send the history your agents already keep.
 
 Afterwards, check it with `afferent status`, then restart your agents (or run
-`/mcp` in Claude Code). You can run `setup` again at any time: steps that are
+`/mcp` in Claude Code). `afferent ui` opens a page in your browser with a map
+of your scopes, the knowledge graph brainsrv built, search, and the same
+status. You can run `setup` again at any time: steps that are
 already done say so. Useful flags:
 - `--dry-run` shows everything and changes nothing.
 - `--yes` answers every question.
@@ -45,8 +47,9 @@ tree and does not reuse Beacon's root command. The code is new files only:
 | `cli/beacon/internal/afferent/mcpconfig` | `mcp config`: the Claude Code, Cursor and Codex config writers (D7) |
 | `cli/beacon/internal/afferent/history` | `sync`: Beacon's Claude Code and Codex collectors (D7) |
 | `cli/beacon/internal/afferent/capture` | setup's capture step: Beacon's hook installers (D7) |
+| `cli/beacon/internal/afferent/ui` | `ui`: the loopback web page and its brainsrv API relay; `static/` is the embedded page and vendored d3 |
 | `cli/beacon/internal/afferent/member` | the signed-in member (settings, tokens, scope) for code outside the CLI, such as the memory backend (D7) |
-| `cli/beacon/internal/afferent/afferenttest` | fake authsrv for tests |
+| `cli/beacon/internal/afferent/afferenttest` | fake authsrv, and a fake brainsrv with the ui read API and a sample data set, for tests |
 
 ## Build and run
 
@@ -64,6 +67,7 @@ go build -o afferent ./cmd/afferent
 ./afferent mcp config --dry-run         # what the agents' configs would get
 ./afferent sync --since 720h           # backfill the last 30 days of history
 ./afferent setup --dry-run
+./afferent ui                          # the brain map, knowledge graph and search in the browser
 ```
 
 Tests: `go test ./internal/afferent/... ./internal/learning/`. They use
@@ -388,6 +392,140 @@ them.
 - **forwarder:** the status file: state and paused reason, when it was last
   updated, the log path, the last success, the last error, the totals, and
   the lag per file.
+
+## ui
+
+```
+afferent ui [--addr 127.0.0.1] [--port 0] [--no-browser]
+```
+
+`afferent ui` serves a page on a loopback address, prints its link and opens
+it in the browser (`open` on macOS, `xdg-open` on Linux) unless
+`--no-browser`. It runs until Ctrl-C. `--port 0`, the default, picks a free
+port. `--addr` accepts `127.0.0.1` (default), another `127.0.0.0/8` address,
+`::1` or `localhost`; anything else is refused.
+
+### The page
+
+- **Header:** who you are and the member scope, the search box and Refresh.
+- **Status strip** (every 10 s, from `GET /api/status`): the forwarder's
+  state and paused reason, last sent, lag, lines sent and accepted, pending
+  extraction (from the overview totals), the service, how long the token is
+  valid, and the brainsrv URL and Context.
+- **Brain map:** a treemap of `GET /v1/overview?depth=3` under the member
+  scope: repos, then harnesses. Tile size is turns, color is how recent the
+  last activity is (a log scale from now to 30 days). A click on a tile lists
+  that scope's recent sessions (`/v1/sessions` with that scope); a click on a
+  session shows its last 20 turns, newest first.
+- **Knowledge graph:** `GET /v1/graph?limit=150`, force-directed. Node
+  radius grows with degree, color is the entity type (the legend counts
+  them), edge width and opacity follow confidence. Drag nodes, scroll to
+  zoom, hover for details. A click on a node shows its facts
+  (`/v1/entities/{id}`) and its relations in view.
+- **Search:** `POST /v1/recall` (`mode: "memories"`, k 20). The results
+  list opens in the side panel, the hit entities are highlighted in the
+  graph, and the tiles of their scopes in the map (a result's `scope` when
+  brainsrv sends one, else its entity's scope from the graph).
+- The map and the graph load on open and on Refresh.
+- Empty brain, signed out, an older brainsrv without `/v1/overview`, and
+  brainsrv down each get a plain message instead of a chart.
+
+The page is `index.html`, `app.js`, `app.css` and a vendored d3 7.9.0,
+embedded with `go:embed` (`internal/afferent/ui/static`; its README records
+d3's source and sha256). There is no build step, and the page loads nothing
+from the network. Everything brainsrv returns is put in the page as text,
+never as HTML.
+
+### Security
+
+The server runs next to every other local process and every web page the
+browser has open, so:
+- **Loopback only**, as above.
+- **A per-launch key.** 32 random bytes, base64url, in the link's fragment
+  (`http://127.0.0.1:<port>/#k=<key>`). Browsers never send a fragment to a
+  server. The page keeps it in `sessionStorage`, removes it from the address
+  bar, and sends it as `X-Afferent-UI-Key` on every `/api` call. A missing or
+  wrong key is a 401 (constant-time compare). The static files need no key;
+  they hold no data.
+- **Host check (DNS rebinding).** Every request, static or API, must carry
+  `Host: 127.0.0.1:<port>` or `localhost:<port>` (or `[::1]:<port>` when
+  listening there); anything else is a 403. A request with a foreign
+  `Origin`, or `Sec-Fetch-Site: cross-site`, is also a 403.
+- **Headers:** no CORS headers; `Content-Security-Policy: default-src 'self';
+  script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src
+  'self'; object-src 'none'; base-uri 'none'; form-action 'none';
+  frame-ancestors 'none'` (no inline script or style); `X-Content-Type-Options:
+  nosniff`; `X-Frame-Options: DENY`; `Referrer-Policy: no-referrer`;
+  `Cross-Origin-Opener-Policy` and `-Resource-Policy: same-origin`;
+  `Cache-Control: no-store`.
+- **Only these routes**; anything else is a 404, and no path is proxied as
+  is. Request bodies are capped at 64 KiB (413).
+- **The token stays in the process.** The server adds `Authorization`,
+  `X-Context` and `X-Scope` itself, from the refreshing token source (one
+  forced refresh and a retry on a 401). The token is never sent to the
+  browser: it is redacted from brainsrv's answers and from errors, and
+  brainsrv error bodies are cut to 300 characters.
+- **Redirects are refused**, like the other brainsrv clients.
+
+### API
+
+All routes need the key. `X-Scope` is the member scope, found like the
+forwarder's (`--scope`/`AFFERENT_SCOPE`/config, `/v1/whoami`, or the cache)
+and cached for a minute.
+
+| Route | brainsrv call | Checks |
+|---|---|---|
+| `GET /api/status` | none (plus `/v1/whoami` for the scope) | |
+| `GET /api/overview?depth=&valid_at=` | `GET /v1/overview` | depth 1..4 (default 3), valid_at RFC 3339 |
+| `GET /api/graph?limit=&scope=&valid_at=` | `GET /v1/graph` | limit 1..500 (default 150); scope at or under the member scope |
+| `POST /api/recall {query, k}` | `POST /v1/recall {query, k, mode: "memories"}` | query 1..4000 chars, k 1..100 (default 20), no other fields |
+| `GET /api/entities/{id}` | `GET /v1/entities/{id}` | id is a UUID |
+| `GET /api/sessions?scope=&limit=` | `GET /v1/sessions?limit=` with `X-Scope` = scope | scope at or under the member scope (default: the member scope); limit 1..500 (default 50) |
+| `GET /api/sessions/{id}/turns` | `GET /v1/sessions/{id}/turns` | id is a UUID |
+
+A scope outside the member scope, or one that is not a dotted label path, is
+a 400 and never reaches brainsrv. brainsrv's JSON answers are passed through
+as they are. Errors are `{"error": "...", "code": "..."}`:
+
+| code | HTTP | meaning |
+|---|---|---|
+| `bad_key` | 401 | missing or wrong key |
+| `bad_host`, `bad_origin` | 403 | Host, Origin or Sec-Fetch-Site check |
+| `signed_out` | 401 | run `afferent login` |
+| `unauthorized` | 401 | brainsrv refused the token after the retry |
+| `forbidden` | 403 | brainsrv denied the scope |
+| `bad_request`, `bad_scope`, `bad_id` | 400 | a parameter failed the checks above |
+| `unsupported` | 404 | brainsrv has no `/v1/overview` or `/v1/graph` |
+| `brainsrv_down`, `brainsrv_error`, `brainsrv_redirect` | 502/504 | brainsrv unreachable, 5xx or a redirect |
+
+`/api/status` is what `afferent status` prints, as JSON: `signed_in`,
+`identity`, `issuer`, `token_expires_at`, `token_valid_seconds`,
+`brainsrv_url`, `context`, `scope`, `scope_source`, `scope_error`,
+`service` (`installed`, `loaded`, `running`, `pid`, ...), `forwarder` (the
+status file, as in `state/status.json`) or `forwarder_error`.
+
+### Tests and the screenshot check
+
+`go test ./internal/afferent/ui/ ./internal/afferent/cli/` covers the key,
+the Host and Origin checks, non-loopback `--addr`, the headers, unknown
+paths, the body limit, scope escapes, UUID checks, redirect refusal, the
+token never appearing in any response, a 401 refresh, signed out, brainsrv
+down, an older brainsrv, an empty brain, and the proxying against the fake
+brainsrv in `afferenttest` (six repos, three harnesses, 123 sessions, 40
+entities, 60 relations).
+
+To look at the page with that fake data (temp config dir, fake authsrv,
+fake brainsrv, fake service; never the real Keychain or
+`~/.config/afferent`):
+
+```sh
+cd cli/beacon
+AFFERENT_UI_DEMO=5m AFFERENT_UI_DEMO_URLFILE=/tmp/ui-url go test -run TestUIDemo ./internal/afferent/cli/ &
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu \
+  --window-size=1400,900 --virtual-time-budget=8000 --screenshot=ui.png "$(cat /tmp/ui-url)"
+```
+
+`AFFERENT_UI_DEMO_MODE=empty`, `signedout` or `down` shows those states.
 
 ## setup (D7)
 

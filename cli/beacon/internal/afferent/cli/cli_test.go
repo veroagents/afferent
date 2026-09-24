@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -39,6 +40,10 @@ type harness struct {
 	lookPath func(string) (string, error)
 	ran      [][]string
 	capture  *fakeCapture
+	// ctx and out, when set, are the command's context and stdout (for
+	// long-running commands such as ui).
+	ctx context.Context
+	out io.Writer
 }
 
 // fakeCapture stands in for Beacon's hook installers.
@@ -121,9 +126,16 @@ func (h *harness) run(args ...string) (string, string, error) {
 		},
 		Capture: h.capture,
 	}
+	if h.out != nil {
+		env.Stdout = h.out
+	}
+	ctx := h.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	root := NewRootCmd(env)
 	root.SetArgs(args)
-	err := root.ExecuteContext(context.Background())
+	err := root.ExecuteContext(ctx)
 	return out.String(), errb.String(), err
 }
 

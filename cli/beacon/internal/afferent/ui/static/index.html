@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>afferent brain</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css">
+<script src="d3.v7.min.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <span class="name">afferent</span>
+    <span class="who" id="who">connecting…</span>
+  </div>
+  <form class="search" id="search" role="search" autocomplete="off">
+    <input id="q" type="search" placeholder="Search your memories (recall)" aria-label="Search memories" maxlength="4000">
+    <button type="submit">Search</button>
+    <button type="button" id="clear-search" class="ghost" hidden>Clear</button>
+  </form>
+  <button type="button" id="refresh" class="ghost" title="Reload the map and the graph">Refresh</button>
+</header>
+
+<section class="strip" id="strip" aria-label="Status"></section>
+<div class="banner" id="banner" role="alert" hidden></div>
+
+<main class="grid">
+  <section class="panel" id="map-panel" aria-labelledby="map-title">
+    <div class="panel-head">
+      <h2 id="map-title">Brain map</h2>
+      <span class="hint" id="map-hint">tile size = turns · color = last activity</span>
+      <span class="scale" aria-hidden="true"><span>recent</span><span class="ramp"></span><span>older</span></span>
+    </div>
+    <div class="viz" id="map"></div>
+  </section>
+
+  <section class="panel" id="graph-panel" aria-labelledby="graph-title">
+    <div class="panel-head">
+      <h2 id="graph-title">Knowledge graph</h2>
+      <span class="hint" id="graph-hint"></span>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="viz" id="graph"></div>
+  </section>
+
+  <aside class="panel side" id="side" aria-live="polite">
+    <div class="side-body" id="side-body"></div>
+  </aside>
+</main>
+
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+</body>
+</html>
