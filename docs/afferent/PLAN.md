@@ -111,6 +111,40 @@ inserting the `afferent-cli` row the same way migration 017 seeds
   earlier API-key run. That is expected, but it matters when moving a user
   from an API key to OAuth: re-sent history is ingested again.
 
+**Live test 2, 2026-09-24: D1, D2, D3, D4 and D5 end to end (vero-local).**
+Deployed builds:
+- authsrv `feat/device-refresh-tokens` @ `d532faa` as image
+  `vero-local/authsrv:device-refresh`, with migrations 028 and 029 applied;
+- brainsrv `beacon-grant-templates` @ `1d54a97` as
+  `vero-local/brainsrv:grant-templates`;
+- afferent `brainsrv` @ `5bd1b3a1`, binary `afferent`.
+
+`afferent-poc` uses the template `tenant_id=<T>` ⇒
+`ws.{tenant_id}.people.{sub}.harness` (read+write).
+
+Results:
+- ✅ `afferent login` completes the device flow after a browser approval.
+  Credentials go to the macOS Keychain; `~/.config/afferent` holds only a
+  0600 config file.
+- ✅ `afferent whoami` shows the token identity and a brainsrv
+  `/v1/whoami` scope that was **derived from claims**:
+  `ws.f8a82fcb785346aeb0f319a379fc2a67.people.3ddaf62869424dd38899dcd652def05f.harness`
+  via the template.
+- ✅ With the JWT, ingesting 2,000 real events into that scope returns 200
+  and recall finds them. The revoked static PoC scope returns 403, and
+  another member's scope in the same tenant returns 403.
+- ✅ With the access token forced to expired, `afferent whoami` refreshes
+  on its own: new access token, **rotated** refresh token.
+- ✅ Replaying the rotated refresh token returns `invalid_grant` and
+  **revokes the family**. The newest refresh token then also returns
+  `invalid_grant` (`device_refresh_sessions.revoked_reason=reuse_detected`).
+- Known: brainsrv binds a `/mcp` session to the hash of its bearer token, so
+  an MCP session breaks on every 15-min refresh. Handle this in D7 (the client
+  re-initializes) or bind JWT sessions to (context, principal) in brainsrv.
+- Known, pre-existing on authsrv `main`: goose fails with "duplicate version
+  27" because it reads `027_seed.example.sql` as a migration. Move that file
+  out of `migrations/`.
+
 **Test plan:** each step is tested live on vero-local with a real browser
 approval. The first test is D1 + D5: device login as `drew@vero.localhost`,
 decode the claims, and call brainsrv with the JWT.
