@@ -55,6 +55,11 @@ vector validate --skip-healthchecks ./afferent-brainsrv-pack/vector.toml
 vector --config ./afferent-brainsrv-pack/vector.toml
 ```
 
+Keep `--skip-healthchecks` on `vector validate`: Vector 0.56 does not resolve
+`SECRET[...]` for validate's healthcheck, so it sends the literal reference as
+the bearer token and brainsrv answers 401. `vector --config` resolves the
+secret, and its startup healthcheck (`HEAD .../health?scope=...`) passes.
+
 ## Backfill
 
 `read_from` only applies to a file with no checkpoint in the data_dir.

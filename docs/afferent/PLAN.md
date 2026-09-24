@@ -592,6 +592,17 @@ enrollment, account, reconnect or privacy transforms. Keep the
   - key-file permission rejection
 - [ ] E2E: use the repo's `self-verify-beacon-in-sandbox` skill, pointed at a
   dev brainsrv.
+  - Local live E2E done (2026-09-24, Vector 0.56.0, brainsrv beacon-phase4 on
+    localhost, no service installed): the hand-run pack delivered the 22-line
+    A2 fixture to `<scope>.{alpha,beta,repo,_norepo}.<harness>` with
+    `health?scope=` listing the 3 hostnames; `turn_extract` touched only
+    prompt/response turns; a restart on the same data_dir re-sent nothing; a
+    fresh data_dir with `read_from = beginning` got
+    `{"accepted":0,"duplicate":23}` and the turn count stayed put. The
+    env-gated `internal/endpoint/brainsrv/live_test.go` repeats it through
+    `Connect` (fake service manager, real Vector on the rendered config),
+    including the 0644 key-file and out-of-grant scope refusals. The sandbox
+    run is still open.
 - Implementation notes (Phase 5):
   - B-6 field names: `ForwarderManager` already has a `Label()` method, so the
     optional fields are `LaunchdLabel`, `SystemdUnit` and `Description`
