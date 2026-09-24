@@ -6,6 +6,7 @@ package brainsrvcfg
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -25,6 +26,8 @@ const (
 
 	// KeyPrefix is the prefix every brainsrv API key carries.
 	KeyPrefix = "spk_"
+	// maxKeyFileBytes bounds the read of a key file.
+	maxKeyFileBytes = 64 << 10
 )
 
 // ErrNotConfigured reports that BEACON_MEMORY_BACKEND is unset: the caller
@@ -137,15 +140,29 @@ func (c Config) Covers(scope string) bool {
 }
 
 // ReadKeyFile reads a brainsrv API key from path. The file must be a regular
-// file (symlinks are rejected, checked with Lstat), and on Unix it must be
-// owned by the current user and not readable or writable by group or others
-// (perm & 0o077 == 0). The trimmed content must be one spk_ key.
+// file (symlinks are rejected), and on Unix it must be owned by the current
+// user and not readable or writable by group or others (perm & 0o077 == 0).
+// The trimmed content must be one spk_ key.
+//
+// The file is opened once, without following a symlink (O_NOFOLLOW on Unix),
+// and every check runs on that descriptor's Stat before reading from the same
+// descriptor, so the file checked is the file read: swapping the path for a
+// symlink between check and read fails instead of reading the target.
 func ReadKeyFile(path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", errors.New("key file path is required")
 	}
-	info, err := os.Lstat(path)
+	// Lstat only for a clear message; the enforcing checks are on the fd.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("key file %s is a symlink; point at the file itself", path)
+	}
+	f, err := openKeyFile(path)
+	if err != nil {
+		return "", fmt.Errorf("key file: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return "", fmt.Errorf("key file: %w", err)
 	}
@@ -158,7 +175,7 @@ func ReadKeyFile(path string) (string, error) {
 	if err := checkKeyFileOwner(path, info); err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileBytes))
 	if err != nil {
 		return "", fmt.Errorf("key file: %w", err)
 	}

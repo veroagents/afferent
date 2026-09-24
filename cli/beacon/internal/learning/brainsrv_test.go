@@ -44,10 +44,11 @@ type fakeBrainsrv struct {
 	recallHits []map[string]interface{}
 	entityView map[string]interface{} // id → GET /v1/entities/{id} body
 	recallCode int
+	superBy    map[string]string // entity id → superseding entity id
 }
 
 func newFakeBrainsrv(t *testing.T) *fakeBrainsrv {
-	f := &fakeBrainsrv{t: t, entities: map[string]string{}, replays: map[string]string{}, entityView: map[string]interface{}{}}
+	f := &fakeBrainsrv{t: t, entities: map[string]string{}, replays: map[string]string{}, entityView: map[string]interface{}{}, superBy: map[string]string{}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
 	return f
@@ -94,6 +95,21 @@ func (f *fakeBrainsrv) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		// brainsrv's SupersedeEntity: 409 when the old entity is superseded
+		// by a different entity or the replacement is not active.
+		oldID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/entities/"), "/supersede")
+		by, _ := call.Body["by"].(string)
+		if cur, ok := f.superBy[oldID]; ok && cur != by {
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"error":"entity %s is already superseded by %s"}`, oldID, cur)
+			return
+		}
+		if _, ok := f.superBy[by]; ok {
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"error":"replacement entity %s is superseded"}`, by)
+			return
+		}
+		f.superBy[oldID] = by
 		fmt.Fprint(w, `{"trace_id":"t"}`)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/recall":
 		if f.recallCode != 0 {
@@ -101,9 +117,17 @@ func (f *fakeBrainsrv) handle(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"error":"boom"}`)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"results": f.recallHits})
+		hits := f.recallHits
+		if k, ok := call.Body["k"].(float64); ok && int(k) < len(hits) {
+			hits = hits[:int(k)]
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"results": hits})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/entities/"):
-		view, ok := f.entityView[strings.TrimPrefix(r.URL.Path, "/v1/entities/")]
+		id := strings.TrimPrefix(r.URL.Path, "/v1/entities/")
+		view, ok := f.entityView[id]
+		if !ok {
+			view, ok = f.synthView(id)
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"error":"entity not found"}`)
@@ -115,6 +139,22 @@ func (f *fakeBrainsrv) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+// synthView renders an entity written through /v1/remember with its
+// supersede state. Callers hold f.mu.
+func (f *fakeBrainsrv) synthView(id string) (map[string]interface{}, bool) {
+	for name, eid := range f.entities {
+		if eid != id {
+			continue
+		}
+		view := map[string]interface{}{"id": id, "type": "beacon.memory", "name": name, "state": "active", "scope": testBaseScope + ".repo", "attributes": map[string]interface{}{}}
+		if by, ok := f.superBy[id]; ok {
+			view["state"], view["superseded_by"] = "superseded", by
+		}
+		return view, true
+	}
+	return nil, false
 }
 
 func (f *fakeBrainsrv) Calls() []fakeCall {

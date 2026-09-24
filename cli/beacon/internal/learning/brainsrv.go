@@ -68,13 +68,26 @@ type BrainsrvBackend struct {
 }
 
 // NewBrainsrvBackend returns a backend for the store at storePath. A nil
-// client uses a client with a 15s timeout.
+// client uses a client with a 15s timeout. Redirects are never followed
+// (see refuseRedirect) unless the caller's client sets its own policy.
 func NewBrainsrvBackend(storePath string, cfg brainsrvcfg.Config, key string, client *http.Client) *BrainsrvBackend {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
+	if client.CheckRedirect == nil {
+		c := *client
+		c.CheckRedirect = refuseRedirect
+		client = &c
+	}
 	return &BrainsrvBackend{store: Open(storePath), cfg: cfg, key: key, client: client}
 }
+
+// refuseRedirect stops the client at any 3xx. Go's default policy re-sends
+// the Authorization header to a same-host or subdomain target whatever its
+// scheme, so a redirect to http:// would leak the spk_ key (and, for 307/308,
+// the memory body) in cleartext and defeat the https-only URL rule. The 3xx
+// comes back as a BrainsrvError instead.
+func refuseRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // Config returns the backend's configuration (the key is not part of it).
 func (b *BrainsrvBackend) Config() brainsrvcfg.Config { return b.cfg }
@@ -106,6 +119,11 @@ func isPermanent(err error) bool {
 func isNotFound(err error) bool {
 	var be *BrainsrvError
 	return errors.As(err, &be) && be.Status == http.StatusNotFound
+}
+
+func isConflict(err error) bool {
+	var be *BrainsrvError
+	return errors.As(err, &be) && be.Status == http.StatusConflict
 }
 
 func (b *BrainsrvBackend) do(ctx context.Context, method, path, scope, idem string, in, out interface{}) error {
@@ -173,24 +191,30 @@ func (b *BrainsrvBackend) memoryScope(m asymptoteobserve.LearningMemoryV1) strin
 	return b.cfg.ScopeFor(projectLabel(m.Project))
 }
 
-// searchScope derives the recall scope for q. ProjectPath is the store's
-// trust boundary: it is resolved only through Store.ProjectIDForPath, and
-// only a project this store already holds yields a scope. An unknown project
-// yields ok=false (no search), never a scope derived from the raw path. No
-// project at all searches the whole base scope.
-func (b *BrainsrvBackend) searchScope(q Query) (string, bool, error) {
+// searchScope derives the recall scope for q and the project it is limited
+// to. ProjectPath is the store's trust boundary: it is resolved only through
+// Store.ProjectIDForPath, and only a project this store already holds yields
+// a scope. An unknown project yields ok=false (no search), never a scope
+// derived from the raw path. No project at all searches the whole base scope
+// (projectID "").
+//
+// The scope alone does not isolate a project: labels are the repo basename
+// (PLAN §1), so ~/work/api and ~/personal/api share <base>.api. Callers must
+// also drop hits whose Project.ID is not projectID, as upstream's project_id
+// filter does.
+func (b *BrainsrvBackend) searchScope(q Query) (scope, projectID string, ok bool, err error) {
 	if strings.TrimSpace(q.ProjectID) == "" && strings.TrimSpace(q.ProjectPath) == "" {
-		return b.cfg.Scope, true, nil
+		return b.cfg.Scope, "", true, nil
 	}
 	scoped, err := b.store.scopeQuery(q)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	project, found, err := b.projectByID(scoped.ProjectID)
 	if err != nil || !found {
-		return "", false, err
+		return "", "", false, err
 	}
-	return b.cfg.ScopeFor(projectLabel(project)), true, nil
+	return b.cfg.ScopeFor(projectLabel(project)), scoped.ProjectID, true, nil
 }
 
 // projectByID returns the full project record the store holds for id.
@@ -389,9 +413,13 @@ func (b *BrainsrvBackend) supersede(ctx context.Context, scope, oldEntity, newEn
 	return b.do(ctx, http.MethodPost, "/v1/entities/"+url.PathEscape(oldEntity)+"/supersede", scope, supersedeKey(oldEntity, newEntity), body, nil)
 }
 
+// maxSupersedeHops bounds how far a supersede chain is followed, locally and
+// in brainsrv, so a corrupt or cyclic chain fails instead of looping.
+const maxSupersedeHops = 16
+
 // syncMemory makes brainsrv match the local memory m: m is remembered, and
-// when m is superseded its replacement is remembered and the old entity is
-// superseded by it (P-A5). useCache reuses entity ids from memory_sync
+// when m is superseded the old entity is superseded by the live head of its
+// replacement chain (P-A5). useCache reuses entity ids from memory_sync
 // instead of re-sending remembers; approval of a fresh memory always sends.
 func (b *BrainsrvBackend) syncMemory(ctx context.Context, m asymptoteobserve.LearningMemoryV1, useCache bool) error {
 	oldID, err := b.entityID(ctx, m, useCache)
@@ -401,22 +429,95 @@ func (b *BrainsrvBackend) syncMemory(ctx context.Context, m asymptoteobserve.Lea
 	if strings.TrimSpace(m.SupersededBy) == "" {
 		return nil
 	}
-	repl, ok, err := b.store.GetMemory(m.SupersededBy)
+	newID, replScope, err := b.replacementEntity(ctx, m, useCache)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return fmt.Errorf("replacement memory %s is not in the local store", m.SupersededBy)
+	scope := commonScope(b.memoryScope(m), replScope)
+	if !b.cfg.Covers(scope) {
+		scope = b.cfg.Scope
 	}
-	newID, err := b.entityID(ctx, repl, useCache)
-	if err != nil {
-		return err
-	}
-	_ = b.markSynced(repl.ID)
 	// valid_from is the supersede time recorded locally, so a retry sends the
 	// identical request under the same Idempotency-Key.
-	scope := commonScope(b.memoryScope(m), b.memoryScope(repl))
-	return b.supersede(ctx, scope, oldID, newID, m.UpdatedAt)
+	return b.supersedeToHead(ctx, scope, oldID, newID, m.UpdatedAt)
+}
+
+// replacementEntity returns the brainsrv entity id and scope of the live
+// head of m's replacement chain. brainsrv refuses (409) a supersede whose
+// replacement is itself superseded, so a local chain A→B→C sends A→C. A
+// replacement that is not in local SQLite (approved on another machine and
+// accepted through GetMissing) is resolved in brainsrv without re-sending
+// its remember.
+func (b *BrainsrvBackend) replacementEntity(ctx context.Context, m asymptoteobserve.LearningMemoryV1, useCache bool) (string, string, error) {
+	seen := map[string]bool{m.ID: true}
+	id := strings.TrimSpace(m.SupersededBy)
+	for hop := 0; hop < maxSupersedeHops; hop++ {
+		if seen[id] {
+			return "", "", fmt.Errorf("supersede chain of memory %s loops at %s", m.ID, id)
+		}
+		seen[id] = true
+		repl, ok, err := b.store.GetMemory(id)
+		if err != nil {
+			return "", "", err
+		}
+		if !ok {
+			view, found, err := b.lookupEntity(ctx, id)
+			if err != nil {
+				return "", "", err
+			}
+			if !found {
+				return "", "", fmt.Errorf("replacement memory %s is in neither the local store nor brainsrv", id)
+			}
+			return view.ID, firstNonEmpty(view.Scope, b.cfg.Scope), nil
+		}
+		if next := strings.TrimSpace(repl.SupersededBy); next != "" {
+			id = next
+			continue
+		}
+		newID, err := b.entityID(ctx, repl, useCache)
+		if err != nil {
+			return "", "", err
+		}
+		_ = b.markSynced(repl.ID)
+		return newID, b.memoryScope(repl), nil
+	}
+	return "", "", fmt.Errorf("supersede chain of memory %s is longer than %d", m.ID, maxSupersedeHops)
+}
+
+// supersedeToHead supersedes oldID by newID. On a 409 it reads both
+// entities: an old entity brainsrv already holds as superseded is out of
+// recall, which is all the sync needs; a replacement superseded in brainsrv
+// (by another machine, or before this retry) is followed to its head. Any
+// other conflict is returned with a hint, and stays permanent (failed).
+func (b *BrainsrvBackend) supersedeToHead(ctx context.Context, scope, oldID, newID, validFrom string) error {
+	seen := map[string]bool{oldID: true}
+	for hop := 0; hop < maxSupersedeHops; hop++ {
+		seen[newID] = true
+		err := b.supersede(ctx, scope, oldID, newID, validFrom)
+		if !isConflict(err) {
+			return err
+		}
+		old, found, gerr := b.entityView(ctx, scope, oldID)
+		if gerr != nil {
+			return fmt.Errorf("%w (and reading entity %s: %v)", err, oldID, gerr)
+		}
+		if found && old.State == "superseded" {
+			return nil
+		}
+		repl, found, gerr := b.entityView(ctx, scope, newID)
+		if gerr != nil {
+			return fmt.Errorf("%w (and reading entity %s: %v)", err, newID, gerr)
+		}
+		next := ""
+		if found && repl.State == "superseded" && repl.SupersededBy != nil {
+			next = strings.TrimSpace(*repl.SupersededBy)
+		}
+		if next == "" || seen[next] {
+			return fmt.Errorf("%w (supersede the memory again with a live replacement, then run `beacon memory brainsrv sync`)", err)
+		}
+		newID = next
+	}
+	return fmt.Errorf("brainsrv supersede chain from entity %s is longer than %d", oldID, maxSupersedeHops)
 }
 
 // PutMemory implements MemoryBackend: it syncs m and records the outcome in
@@ -496,45 +597,94 @@ func (b *BrainsrvBackend) SearchMemories(ctx context.Context, q Query) ([]asympt
 	return out, err
 }
 
+// Recall over-fetch. brainsrv ranks attribute rows, not entities, and does
+// not dedupe per entity: one memory's summary, title and body each come back
+// as separate hits. searchWithHistory therefore asks for recallOverfetch×
+// the memories it needs and, when the distinct memories still fall short and
+// brainsrv filled k, repeats with a larger k up to maxRecallK.
+const (
+	recallOverfetch = 4
+	minRecallK      = 20
+	maxRecallK      = 2000
+)
+
 func (b *BrainsrvBackend) searchWithHistory(ctx context.Context, q Query) ([]asymptoteobserve.LearningMemoryV1, []HistoryHit, error) {
-	scope, ok, err := b.searchScope(q)
+	scope, projectID, ok, err := b.searchScope(q)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !ok {
 		return []asymptoteobserve.LearningMemoryV1{}, nil, nil
 	}
+	query := strings.TrimSpace(q.Q)
 	limit := normalizeLimit(q.Limit)
 	skip := offset(q)
-	k := (limit + skip) * 2
-	if k > 500 {
-		k = 500
+	want := limit + skip
+	k := want * recallOverfetch
+	if k < minRecallK {
+		k = minRecallK
 	}
-	res, err := b.recall(ctx, scope, strings.TrimSpace(q.Q), k)
-	if err != nil {
-		return nil, nil, err
+	if k > maxRecallK {
+		k = maxRecallK
 	}
-	seen := map[string]bool{}
-	var memories []asymptoteobserve.LearningMemoryV1
-	var history []HistoryHit
-	for _, hit := range res.Results {
-		if hit.EntityType != BrainsrvMemoryEntityType {
-			history = append(history, HistoryHit{Text: hit.Text, Table: hit.Table, KnownAt: hit.KnownAt, SrcKind: hit.SrcKind, Source: historySource})
-			continue
-		}
-		if hit.EntityID == "" || seen[hit.EntityID] {
-			continue
-		}
-		seen[hit.EntityID] = true
-		m, found, err := b.memoryForHit(ctx, scope, hit)
+	type mapped struct {
+		m     asymptoteobserve.LearningMemoryV1
+		found bool
+	}
+	cache := map[string]mapped{} // entity id → memory, across rounds
+	var (
+		memories []asymptoteobserve.LearningMemoryV1
+		history  []HistoryHit
+	)
+	for {
+		res, err := b.recall(ctx, scope, query, k)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !found || (q.Kind != "" && m.Kind != q.Kind) {
-			continue
+		memories, history = nil, nil
+		seen := map[string]bool{}
+		for _, hit := range res.Results {
+			if hit.EntityType != BrainsrvMemoryEntityType {
+				history = append(history, HistoryHit{Text: hit.Text, Table: hit.Table, KnownAt: hit.KnownAt, SrcKind: hit.SrcKind, Source: historySource})
+				continue
+			}
+			if hit.EntityID == "" || seen[hit.EntityID] {
+				continue
+			}
+			seen[hit.EntityID] = true
+			got, cached := cache[hit.EntityID]
+			if !cached {
+				m, found, err := b.memoryForHit(ctx, scope, hit)
+				if err != nil {
+					return nil, nil, err
+				}
+				got = mapped{m: m, found: found}
+				cache[hit.EntityID] = got
+			}
+			m := got.m
+			if !got.found || (q.Kind != "" && m.Kind != q.Kind) {
+				continue
+			}
+			// Same-label projects share a scope; keep upstream's project_id
+			// isolation.
+			if projectID != "" && m.Project.ID != projectID {
+				continue
+			}
+			memories = append(memories, m)
 		}
-		memories = append(memories, m)
+		if len(memories) >= want || len(res.Results) < k || k >= maxRecallK {
+			break
+		}
+		k *= recallOverfetch
+		if k > maxRecallK {
+			k = maxRecallK
+		}
 	}
+	unsynced, err := b.unsyncedMatches(Query{ProjectID: projectID, Kind: q.Kind, Q: query})
+	if err != nil {
+		return nil, nil, err
+	}
+	memories = mergeUnsynced(unsynced, memories)
 	if skip >= len(memories) {
 		memories = nil
 	} else {
@@ -547,6 +697,74 @@ func (b *BrainsrvBackend) searchWithHistory(ctx context.Context, q Query) ([]asy
 		memories = []asymptoteobserve.LearningMemoryV1{}
 	}
 	return memories, history, nil
+}
+
+// unsyncedMatches returns the local memories matching q whose memory_sync
+// row is pending or failed: approved (or changed) here, but not in brainsrv
+// yet. Without them a successful recall would hide every such memory, with
+// no degraded flag, until someone ran `beacon memory brainsrv sync` by hand.
+// The match is upstream's own local text search. Memories with no row at all
+// predate the backend and are backfilled by `sync --all`; they are not
+// merged, so brainsrv's ranking is not overridden wholesale.
+func (b *BrainsrvBackend) unsyncedMatches(q Query) ([]asymptoteobserve.LearningMemoryV1, error) {
+	db, err := b.syncDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT memory_id FROM memory_sync WHERE state IN (?, ?)`, SyncStatePending, SyncStateFailed)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	unsynced := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			_ = db.Close()
+			return nil, err
+		}
+		unsynced[id] = true
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	_ = db.Close()
+	if err != nil || len(unsynced) == 0 {
+		return nil, err
+	}
+	q.Limit = 500
+	local, err := b.store.ListMemories(q)
+	if err != nil {
+		return nil, err
+	}
+	var out []asymptoteobserve.LearningMemoryV1
+	for _, m := range local {
+		if unsynced[m.ID] {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// mergeUnsynced puts the unsynced local matches first (they are exact term
+// matches, usually fresh approvals) followed by the recall results, dropping
+// any memory that appears in both.
+func mergeUnsynced(unsynced, recalled []asymptoteobserve.LearningMemoryV1) []asymptoteobserve.LearningMemoryV1 {
+	if len(unsynced) == 0 {
+		return recalled
+	}
+	seen := map[string]bool{}
+	out := make([]asymptoteobserve.LearningMemoryV1, 0, len(unsynced)+len(recalled))
+	for _, list := range [][]asymptoteobserve.LearningMemoryV1{unsynced, recalled} {
+		for _, m := range list {
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // memoryForHit maps a beacon.memory hit to a memory: local SQLite by
@@ -577,20 +795,34 @@ type brainsrvEntityAttribute struct {
 }
 
 type brainsrvEntityView struct {
-	ID         string                             `json:"id"`
-	Type       string                             `json:"type"`
-	Name       string                             `json:"name"`
-	State      string                             `json:"state"`
-	Scope      string                             `json:"scope"`
-	Attributes map[string]brainsrvEntityAttribute `json:"attributes"`
+	ID           string                             `json:"id"`
+	Type         string                             `json:"type"`
+	Name         string                             `json:"name"`
+	State        string                             `json:"state"`
+	Scope        string                             `json:"scope"`
+	SupersededBy *string                            `json:"superseded_by,omitempty"`
+	Attributes   map[string]brainsrvEntityAttribute `json:"attributes"`
+}
+
+// entityView is GET /v1/entities/{id}; found=false on a 404.
+func (b *BrainsrvBackend) entityView(ctx context.Context, scope, entityID string) (brainsrvEntityView, bool, error) {
+	var view brainsrvEntityView
+	err := b.do(ctx, http.MethodGet, "/v1/entities/"+url.PathEscape(entityID), scope, "", nil, &view)
+	if isNotFound(err) {
+		return brainsrvEntityView{}, false, nil
+	}
+	if err != nil {
+		return brainsrvEntityView{}, false, err
+	}
+	return view, true, nil
 }
 
 func (b *BrainsrvBackend) getEntityMemory(ctx context.Context, scope, entityID string) (asymptoteobserve.LearningMemoryV1, error) {
-	var view brainsrvEntityView
-	if err := b.do(ctx, http.MethodGet, "/v1/entities/"+url.PathEscape(entityID), scope, "", nil, &view); err != nil {
+	view, found, err := b.entityView(ctx, scope, entityID)
+	if err != nil {
 		return asymptoteobserve.LearningMemoryV1{}, err
 	}
-	if view.Type != BrainsrvMemoryEntityType {
+	if !found || view.Type != BrainsrvMemoryEntityType {
 		return asymptoteobserve.LearningMemoryV1{}, &BrainsrvError{Method: http.MethodGet, Path: "/v1/entities/" + entityID, Status: http.StatusNotFound, Body: "not a " + BrainsrvMemoryEntityType}
 	}
 	return entityToMemory(view), nil
@@ -647,14 +879,13 @@ func entityToMemory(view brainsrvEntityView) asymptoteobserve.LearningMemoryV1 {
 	return m
 }
 
-// GetMemory implements MemoryBackend for a memory missing from local SQLite
-// (approved on another machine). The entity id comes from memory_sync when
-// this machine has one, else from a recall for the id restricted to
-// beacon.memory entities named exactly id.
-func (b *BrainsrvBackend) GetMemory(ctx context.Context, id string) (asymptoteobserve.LearningMemoryV1, bool, error) {
+// lookupEntity finds the beacon.memory entity brainsrv holds for memory id:
+// the entity id comes from memory_sync when this machine has one, else from
+// a recall for the id restricted to beacon.memory entities named exactly id.
+func (b *BrainsrvBackend) lookupEntity(ctx context.Context, id string) (brainsrvEntityView, bool, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return asymptoteobserve.LearningMemoryV1{}, false, nil
+		return brainsrvEntityView{}, false, nil
 	}
 	scope := b.cfg.Scope
 	entityID := ""
@@ -664,7 +895,7 @@ func (b *BrainsrvBackend) GetMemory(ctx context.Context, id string) (asymptoteob
 	if entityID == "" {
 		res, err := b.recall(ctx, scope, id, 20)
 		if err != nil {
-			return asymptoteobserve.LearningMemoryV1{}, false, err
+			return brainsrvEntityView{}, false, err
 		}
 		for _, hit := range res.Results {
 			if hit.EntityType == BrainsrvMemoryEntityType && hit.EntityName == id && hit.EntityID != "" {
@@ -674,17 +905,36 @@ func (b *BrainsrvBackend) GetMemory(ctx context.Context, id string) (asymptoteob
 		}
 	}
 	if entityID == "" {
-		return asymptoteobserve.LearningMemoryV1{}, false, nil
+		return brainsrvEntityView{}, false, nil
 	}
-	m, err := b.getEntityMemory(ctx, scope, entityID)
-	if isNotFound(err) {
-		return asymptoteobserve.LearningMemoryV1{}, false, nil
+	view, found, err := b.entityView(ctx, scope, entityID)
+	if err != nil || !found {
+		return brainsrvEntityView{}, false, err
 	}
-	if err != nil {
+	if view.Type != BrainsrvMemoryEntityType || view.Name != id {
+		return brainsrvEntityView{}, false, nil
+	}
+	if view.ID == "" {
+		view.ID = entityID
+	}
+	return view, true, nil
+}
+
+// GetMemory implements MemoryBackend for a memory missing from local SQLite
+// (approved on another machine). A memory brainsrv holds as superseded comes
+// back with SupersededBy set to its replacement's memory id, as a local
+// superseded row would.
+func (b *BrainsrvBackend) GetMemory(ctx context.Context, id string) (asymptoteobserve.LearningMemoryV1, bool, error) {
+	view, found, err := b.lookupEntity(ctx, id)
+	if err != nil || !found {
 		return asymptoteobserve.LearningMemoryV1{}, false, err
 	}
-	if m.ID != id {
-		return asymptoteobserve.LearningMemoryV1{}, false, nil
+	m := entityToMemory(view)
+	if view.State == "superseded" && view.SupersededBy != nil && *view.SupersededBy != "" {
+		m.SupersededBy = *view.SupersededBy // the entity id, if its name is unreadable
+		if repl, ok, err := b.entityView(ctx, b.cfg.Scope, *view.SupersededBy); err == nil && ok && repl.Name != "" {
+			m.SupersededBy = repl.Name
+		}
 	}
 	return m, true, nil
 }
