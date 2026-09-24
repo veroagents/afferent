@@ -1,0 +1,83 @@
+# afferent: Beacon Endpoint Agent -> brainsrv runtime ingest
+#
+# Vector tails Beacon's local runtime JSONL and POSTs it, gzip-compressed and
+# newline-delimited, to brainsrv's Beacon ingest with the member's own spk_ API
+# key. The key is read from a 0600 JSON file through Vector's secret backend so
+# it appears in neither this config nor the process environment.
+#
+# Required environment:
+#   BEACON_BRAINSRV_URL           brainsrv base URL (https; http only for localhost)
+#   BEACON_BRAINSRV_SCOPE         the member's base scope, e.g. ws.<id>.people.<member>.harness
+#   BEACON_BRAINSRV_SECRETS_FILE  path to a {"brainsrv_key": "spk_..."} file (mode 0600)
+# Optional:
+#   BEACON_BRAINSRV_DATA_DIR      Vector data_dir for checkpoints and the disk buffer
+#   BEACON_BRAINSRV_READ_FROM     "end" (default) or "beginning" to backfill the existing log
+#
+# `beacon endpoint brainsrv connect` writes this file with every value filled in
+# and runs Vector as a service; this template is for running the same forwarder
+# by hand. It is independent of the Beacon Managed forwarder: its own
+# data_dir, checkpoints, disk buffer, secrets file and service.
+
+data_dir = "${BEACON_BRAINSRV_DATA_DIR:-/var/lib/vector/afferent-brainsrv}"
+
+[secret.beacon]
+type = "file"
+path = "${BEACON_BRAINSRV_SECRETS_FILE}"
+
+[sources.beacon_runtime]
+type = "file"
+include = ["{{LOG_PATH}}"]
+# "end" ships only what is recorded after the forwarder first starts; "beginning"
+# (connect --backfill) ships the existing log too. Either applies only while this
+# data_dir has no checkpoint for the file: after that Vector resumes from the
+# checkpoint. Re-sent lines are safe, brainsrv deduplicates on event.id.
+read_from = "${BEACON_BRAINSRV_READ_FROM:-end}"
+
+# BEACON_PRIVACY_TRANSFORMS
+
+[sinks.brainsrv_runtime]
+type = "http"
+inputs = ["beacon_runtime"]
+uri = "${BEACON_BRAINSRV_URL}/v1/ingest/beacon/runtime"
+method = "post"
+compression = "gzip"
+
+[sinks.brainsrv_runtime.auth]
+strategy = "bearer"
+token = "SECRET[beacon.brainsrv_key]"
+
+[sinks.brainsrv_runtime.encoding]
+codec = "text"
+
+[sinks.brainsrv_runtime.framing]
+method = "newline_delimited"
+
+[sinks.brainsrv_runtime.request.headers]
+Content-Type = "application/x-ndjson"
+# brainsrv requires X-Scope: the member's base scope. Sessions land under
+# <scope>.<repo_label>.<harness_label>; a scope the key cannot write is a 403
+# for the whole batch, which Vector does not retry.
+X-Scope = "${BEACON_BRAINSRV_SCOPE}"
+
+[sinks.brainsrv_runtime.batch]
+# Stays under brainsrv's 8 MiB compressed / 10,000 line limits.
+max_bytes = 5000000
+max_events = 5000
+timeout_secs = 60
+
+[sinks.brainsrv_runtime.buffer]
+# Survives offline periods and forwarder restarts; drains on reconnect.
+type = "disk"
+max_size = 536870912
+when_full = "block"
+
+[sinks.brainsrv_runtime.request]
+timeout_secs = 30
+retry_initial_backoff_secs = 2
+retry_max_duration_secs = 300
+
+# Vector's healthcheck sends the bearer key but not request.headers, so the scope
+# rides in the query: a revoked key (401) or a scope the key cannot read (403)
+# shows up as an unhealthy sink at startup instead of silently failing batches.
+[sinks.brainsrv_runtime.healthcheck]
+uri = "${BEACON_BRAINSRV_URL}/v1/ingest/beacon/health?scope=${BEACON_BRAINSRV_SCOPE}"

@@ -560,7 +560,7 @@ reading and the label sanitizer, and is shared with B3.
 New package `internal/endpoint/brainsrv/`, cloned from `asymptote/` without
 enrollment, account, reconnect or privacy transforms. Keep the
 `# BEACON_PRIVACY_TRANSFORMS` marker as the future hook.
-- [ ] `pack/vector.toml.tmpl`:
+- [x] `pack/vector.toml.tmpl`:
   - runtime source only, `read_from` = `end` | `beginning` (`--backfill`)
   - its own `data_dir` (`…/afferent-brainsrv`), so checkpoints are separate
     from managed
@@ -571,7 +571,7 @@ enrollment, account, reconnect or privacy transforms. Keep the
   - healthcheck `uri=<url>/v1/ingest/beacon/health`
   - Render the literals the same way as `RenderVectorConfig`, so the unit
     needs no env.
-- [ ] Commands, in `cmd/endpoint_brainsrv.go` (new, self-registering on
+- [x] Commands, in `cmd/endpoint_brainsrv.go` (new, self-registering on
   `endpointCmd`):
   - `connect --url --scope --key-file [--backfill]`:
     - `ReadKeyFile` (the member's own key, §1.2)
@@ -584,14 +584,31 @@ enrollment, account, reconnect or privacy transforms. Keep the
   - `status`: service state, Vector checkpoint offset, brainsrv
     `last_seen` from GET health
   - `disconnect`, `print-config`, `install-pack --output`, `validate`
-- [ ] Coexistence: different label, unit, data_dir and secrets file. Test that
+- [x] Coexistence: different label, unit, data_dir and secrets file. Test that
   both render and that neither's state paths overlap.
-- [ ] Tests:
+- [x] Tests:
   - rendered config matches a golden file
   - `validate` against Vector ≥ 0.50 (skip if Vector is absent)
   - key-file permission rejection
 - [ ] E2E: use the repo's `self-verify-beacon-in-sandbox` skill, pointed at a
   dev brainsrv.
+- Implementation notes (Phase 5):
+  - B-6 field names: `ForwarderManager` already has a `Label()` method, so the
+    optional fields are `LaunchdLabel`, `SystemdUnit` and `Description`
+    (zero values keep `ForwarderLabel`, `ForwarderSystemdUnit` and the
+    Asymptote description).
+  - The healthcheck URI carries `?scope=<base>` (Vector's healthcheck sends
+    the bearer key but not `request.headers`). `connect` also POSTs an empty
+    NDJSON batch with `X-Scope` as the write-grant probe; 401/403 on either
+    refuses.
+  - `--backfill` renders `read_from = "beginning"` and clears
+    `<data_dir>/beacon_runtime/` (Vector's file-source checkpoints), since
+    `read_from` only applies to files without a checkpoint. A later connect
+    without it renders `end` and keeps the checkpoints.
+  - Verified against the official Vector 0.56.0: `vector validate` accepts the
+    render and the hand-run template, and a live run sends gzip NDJSON with
+    `X-Scope`, bearer key and `HEAD …/health?scope=…`; checkpoints land in
+    `<data_dir>/beacon_runtime/checkpoints.json`.
 
 ### Packaging
 - [ ] `cli/beacon/.goreleaser.afferent.yaml` (new):
